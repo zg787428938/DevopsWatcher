@@ -7,7 +7,8 @@ import { store } from '../../store';
 import { ApiBridge } from '../services/api-bridge';
 import { db } from '../services/db';
 import { sendNotification, playBeep } from '../services/notification';
-import { log, resetLog, downloadLog, formatApiData, formatChange } from '../services/logger';
+import { log, resetLog, downloadLog, getLogs, formatApiData, formatChange } from '../services/logger';
+import { isContextValid } from './recovery';
 import { Scanner } from './scanner';
 import { Waiter } from './waiter';
 import { detectChanges } from './detector';
@@ -41,13 +42,18 @@ export class TestRunner {
       await this.phaseNotification();
       await this.phaseIndexedDB();
       await this.phaseMemory();
-      log('Summary', 'PASS', `全部测试完成，耗时 ${((Date.now() - testStartTime) / 1000).toFixed(1)}s`);
+      await this.phaseRuntimeHealth();
+      this.logTestSummary(testStartTime);
     } catch (err) {
       const e = err as Error;
       log('Summary', 'FAIL', `测试中断: ${e.message}`, e.stack);
+      this.logTestSummary(testStartTime);
     } finally {
       store.setState({ isTesting: false, status: '测试结束，日志已下载', statusType: 'normal' });
       downloadLog();
+      setTimeout(() => {
+        try { chrome.runtime.sendMessage({ type: 'CLOSE_TAB' }); } catch {}
+      }, 1000);
     }
   }
 
@@ -55,9 +61,16 @@ export class TestRunner {
   private async phaseEnvironment() {
     store.setState({ status: '🧪 Phase 1: 环境检测...' });
 
+    // 版本信息
+    try {
+      const manifest = chrome.runtime.getManifest();
+      log('Environment', 'INFO', '版本', `v${manifest.version} (${manifest.name})`);
+    } catch {
+      log('Environment', 'WARN', '版本', '无法读取 manifest（扩展上下文可能已失效）');
+    }
+
     log('Environment', 'INFO', 'URL', location.href);
     log('Environment', 'INFO', 'UserAgent', navigator.userAgent);
-    log('Environment', 'INFO', 'readyState', document.readyState);
     log('Environment', 'INFO', 'timestamp', new Date().toISOString());
 
     const configDump = JSON.stringify({
@@ -66,18 +79,11 @@ export class TestRunner {
       maxInterval: CONFIG.maxInterval,
       maxPages: CONFIG.maxPages,
       apiWaitMaxRetries: CONFIG.apiWaitMaxRetries,
-      apiWaitRetryInterval: CONFIG.apiWaitRetryInterval,
-      clickRenderDelay: CONFIG.clickRenderDelay,
-      paginationDelayMin: CONFIG.paginationDelayMin,
-      paginationDelayMax: CONFIG.paginationDelayMax,
-      apiFreshnessThreshold: CONFIG.apiFreshnessThreshold,
-      fastPollMaxAttempts: CONFIG.fastPollMaxAttempts,
-      fastPollInterval: CONFIG.fastPollInterval,
       loadTimeoutThreshold: CONFIG.loadTimeoutThreshold,
       memoryLimitMB: CONFIG.memoryLimitMB,
+      maxHistoryRecords: CONFIG.maxHistoryRecords,
       maxChangesRecords: CONFIG.maxChangesRecords,
       selectors: CONFIG.selectors,
-      apiPath: CONFIG.apiPath,
     }, null, 2);
     log('Environment', 'INFO', 'CONFIG', configDump);
 
@@ -87,13 +93,15 @@ export class TestRunner {
     const hasQuery = location.href.includes('?');
     log('Environment', hasQuery ? 'PASS' : 'FAIL', 'URL activation', `contains '?': ${hasQuery}`);
 
-    // 倒计时舍入方式：Math.round 避免 timer jitter 导致秒数跳跃
-    log('Environment', 'INFO', '倒计时舍入', 'Math.round（消除 Math.ceil 在整数边界的 2 秒跳跃）');
+    // inject.js 注入验证
+    const scripts = document.querySelectorAll('script[src*="inject.js"]');
+    log('Environment', scripts.length > 0 ? 'PASS' : 'WARN', 'inject.js 注入',
+      scripts.length > 0 ? `找到 ${scripts.length} 个 script 标签` : '未找到 inject.js 标签（API 拦截可能失败）');
 
     // isMonitoring 持久化验证
     const MONITORING_KEY = 'devops-watcher-monitoring';
     const savedBefore = localStorage.getItem(MONITORING_KEY);
-    log('Environment', 'INFO', 'isMonitoring 持久化（当前值）', `localStorage["${MONITORING_KEY}"]="${savedBefore}"`);
+    log('Environment', 'INFO', 'isMonitoring 持久化', `localStorage="${savedBefore}"`);
     try {
       localStorage.setItem(MONITORING_KEY, '__test__');
       const readBack = localStorage.getItem(MONITORING_KEY);
@@ -103,9 +111,9 @@ export class TestRunner {
       } else {
         localStorage.removeItem(MONITORING_KEY);
       }
-      log('Environment', writable ? 'PASS' : 'FAIL', 'isMonitoring 持久化（读写）', `writable=${writable}`);
+      log('Environment', writable ? 'PASS' : 'FAIL', 'localStorage 读写', `writable=${writable}`);
     } catch (e) {
-      log('Environment', 'FAIL', 'isMonitoring 持久化（读写）', `localStorage 不可用: ${(e as Error).message}`);
+      log('Environment', 'FAIL', 'localStorage 读写', `不可用: ${(e as Error).message}`);
     }
   }
 
@@ -113,19 +121,50 @@ export class TestRunner {
   private async phaseApiIntercept() {
     store.setState({ status: '🧪 Phase 2: API 拦截检测...' });
 
+    let apiData: ApiResponseData | null = null;
     const cached = this.apiBridge.getLatest();
     if (cached) {
+      apiData = cached.data;
       log('API', 'PASS', '已有缓存数据', formatApiData(cached.data, cached.url, cached.timestamp));
     } else {
       log('API', 'INFO', '无缓存数据，等待 API 响应...');
       const waitStart = Date.now();
       try {
-        const data = await this.apiBridge.waitForFreshResponse(0, 15_000);
+        apiData = await this.apiBridge.waitForFreshResponse(0, 15_000);
         const elapsed = Date.now() - waitStart;
-        log('API', 'PASS', `收到 API 响应 (${elapsed}ms)`, formatApiData(data));
+        log('API', 'PASS', `收到 API 响应 (${elapsed}ms)`, formatApiData(apiData));
       } catch {
         const elapsed = Date.now() - waitStart;
         log('API', 'FAIL', `等待 API 响应超时 (${elapsed}ms)`, '15秒内未收到任何 API 响应，inject.js 可能未成功注入');
+      }
+    }
+
+    // API 数据结构验证
+    if (apiData) {
+      const checks: string[] = [];
+      if (typeof apiData.totalCount !== 'number' || apiData.totalCount < 0)
+        checks.push(`totalCount 异常: ${apiData.totalCount}`);
+      if (!Array.isArray(apiData.result))
+        checks.push('result 不是数组');
+      if (typeof apiData.toPage !== 'number' || apiData.toPage < 1)
+        checks.push(`toPage 异常: ${apiData.toPage}`);
+      if (typeof apiData.pageSize !== 'number' || apiData.pageSize <= 0)
+        checks.push(`pageSize 异常: ${apiData.pageSize}`);
+      if (apiData.result.length > 0 && !apiData.result[0].subject)
+        checks.push('result[0] 缺少 subject 字段');
+
+      if (checks.length > 0) {
+        log('API', 'FAIL', 'API 数据结构异常', checks.join('\n'));
+      } else {
+        log('API', 'PASS', 'API 数据结构正常',
+          `totalCount=${apiData.totalCount} resultLength=${apiData.result.length} toPage=${apiData.toPage} pageSize=${apiData.pageSize}`);
+      }
+
+      // URL 路径验证
+      if (cached?.url) {
+        const matchesPath = cached.url.includes(CONFIG.apiPath);
+        log('API', matchesPath ? 'PASS' : 'WARN', 'API URL 路径',
+          `url=${cached.url} expected contains="${CONFIG.apiPath}" match=${matchesPath}`);
       }
     }
   }
@@ -182,7 +221,6 @@ export class TestRunner {
   }
 
   // ==================== Phase 4: 初始收集（与 monitor.initialCollect 一致） ====================
-  // 仅提取当前页面已有的目标池数据，不主动点击其他池
   private async phaseInitialCollect() {
     store.setState({ status: '🧪 Phase 4: 初始收集...' });
 
@@ -192,7 +230,25 @@ export class TestRunner {
       log('InitialCollect', 'INFO', `当前页面在目标池 "${currentPool}" 上，提取已有数据`);
       const cached = this.apiBridge.getLatest();
       if (cached) {
-        await this.collectAndLog('InitialCollect', currentPool, cached.data, false);
+        const data = cached.data;
+        const pageSize = data.pageSize || 100;
+        const totalPages = Math.ceil(data.totalCount / pageSize);
+
+        // 分页状态检测
+        if (data.toPage > 1) {
+          log('InitialCollect', 'WARN', `缓存数据在第 ${data.toPage} 页`,
+            `页面可能保留了上次浏览的分页状态，初始快照将不完整`);
+        }
+
+        if (totalPages > 1) {
+          log('InitialCollect', 'INFO', `"${currentPool}" 有 ${totalPages} 页`,
+            `仅有第 ${data.toPage} 页的 ${data.result.length} 条数据，monitor 会跳过部分快照保存`);
+          // 模拟 monitor.initialCollect 的多页处理逻辑：不保存部分快照
+          log('InitialCollect', 'PASS', `"${currentPool}" 多页池处理正确`,
+            '跳过部分快照保存，避免后续误报变化');
+        } else {
+          await this.collectAndLog('InitialCollect', currentPool, data, false);
+        }
       } else {
         log('InitialCollect', 'WARN', `当前池 "${currentPool}" 无缓存数据`);
       }
@@ -280,6 +336,35 @@ export class TestRunner {
 
     const totalElapsed = ((Date.now() - roundStart) / 1000).toFixed(1);
     log('CountdownRound', 'PASS', `倒计时轮询完成，实际耗时 ${totalElapsed}s（计划 ${interval}s）`);
+
+    // 轮次后快照一致性验证
+    const finalSnapshots = store.getState().poolSnapshots;
+    const snapshotIssues: string[] = [];
+    for (const target of CONFIG.targets) {
+      const snap = finalSnapshots[target];
+      if (!snap) {
+        snapshotIssues.push(`"${target}" 无快照（检测可能失败）`);
+        continue;
+      }
+      if (snap.requirements.length < snap.totalCount) {
+        snapshotIssues.push(`"${target}" 数据不完整: ${snap.requirements.length}/${snap.totalCount}`);
+      }
+      // 需求名去重检查：重复的 subject 可能导致变化检测失准
+      const uniqueNames = new Set(snap.requirements);
+      if (uniqueNames.size < snap.requirements.length) {
+        const dupeCount = snap.requirements.length - uniqueNames.size;
+        snapshotIssues.push(`"${target}" 有 ${dupeCount} 条重名需求，可能影响变化检测准确性`);
+      }
+    }
+    if (snapshotIssues.length > 0) {
+      log('CountdownRound', 'WARN', '轮次后快照问题', snapshotIssues.join('\n'));
+    } else {
+      const summary = CONFIG.targets.map(t => {
+        const s = finalSnapshots[t];
+        return `${t}:${s?.totalCount ?? '?'}`;
+      }).join(' ');
+      log('CountdownRound', 'PASS', '轮次后快照完整', summary);
+    }
   }
 
   // 通用的点击 → 等待 → 收集流程，供 initialCollect 和 countdownRound 共用
@@ -322,24 +407,96 @@ export class TestRunner {
 
     if (!apiData) return false;
 
+    // 分页状态残留检测：上一轮翻页后页面未重置，导致当前返回非第 1 页数据
+    if (apiData.toPage > 1) {
+      log(phase, 'WARN', `"${poolName}" 分页状态残留`,
+        `toPage=${apiData.toPage}（期望 1），页面保留了上次翻页状态`);
+
+      const pagItems = document.querySelectorAll('.next-pagination-item');
+      let firstPageBtn: HTMLElement | null = null;
+      for (const item of pagItems) {
+        const el = item as HTMLElement;
+        const text = el.textContent?.trim();
+        if (text === '1' && !el.classList.contains('next-next') && !el.classList.contains('next-prev')) {
+          firstPageBtn = el;
+          break;
+        }
+      }
+      if (!firstPageBtn) {
+        firstPageBtn = document.querySelector(CONFIG.selectors.prevPageBtn) as HTMLElement | null;
+      }
+
+      if (firstPageBtn) {
+        this.apiBridge.invalidateFreshness();
+        const resetTime = Date.now();
+        simulateClick(firstPageBtn);
+        await sleep(CONFIG.clickRenderDelay);
+        await this.waiter.waitForContentReady();
+        try {
+          apiData = await this.apiBridge.waitForFreshResponse(resetTime, 10_000);
+          log(phase, apiData.toPage === 1 ? 'PASS' : 'WARN', `"${poolName}" 分页回退`,
+            `toPage=${apiData.toPage} resultLength=${apiData.result.length}`);
+        } catch {
+          log(phase, 'FAIL', `"${poolName}" 分页回退超时`);
+          return false;
+        }
+      } else {
+        log(phase, 'FAIL', `"${poolName}" 未找到分页回退按钮`);
+      }
+    }
+
     await this.collectAndLog(phase, poolName, apiData, true);
     return true;
   }
 
   private async collectAndLog(phase: string, poolName: string, apiData: ApiResponseData, didClick: boolean) {
     let allRequirements: string[];
-    const totalPages = Math.ceil(apiData.totalCount / (apiData.pageSize || 100));
-    log(phase, 'INFO', `"${poolName}" 分页信息`, `totalCount=${apiData.totalCount} pageSize=${apiData.pageSize} totalPages=${totalPages} maxPages=${CONFIG.maxPages}`);
+    const pageSize = apiData.pageSize || 100;
+    const totalPages = Math.ceil(apiData.totalCount / pageSize);
+    log(phase, 'INFO', `"${poolName}" 分页信息`,
+      `totalCount=${apiData.totalCount} pageSize=${pageSize} toPage=${apiData.toPage} totalPages=${totalPages} maxPages=${CONFIG.maxPages}`);
+
+    // 数据一致性检查：resultLength vs pageSize/totalCount
+    const expectedLen = apiData.toPage < totalPages ? pageSize : apiData.totalCount - (apiData.toPage - 1) * pageSize;
+    if (apiData.result.length !== expectedLen && apiData.result.length !== apiData.totalCount) {
+      log(phase, 'WARN', `"${poolName}" 数据长度异常`,
+        `resultLength=${apiData.result.length} expected=${expectedLen}（toPage=${apiData.toPage} of ${totalPages}）`);
+    }
 
     if (totalPages > 1 && didClick) {
+      if (apiData.toPage !== 1) {
+        log(phase, 'WARN', `"${poolName}" 翻页起始页异常`,
+          `toPage=${apiData.toPage}，collectAllPages 将从非第 1 页开始，数据可能不完整`);
+      }
       const pageStart = Date.now();
       allRequirements = await collectAllPages(this.apiBridge, this.waiter, apiData);
       log(phase, 'INFO', `"${poolName}" 翻页完成 (${Date.now() - pageStart}ms)`, `collected=${allRequirements.length} items`);
+
+      // 翻页完整性检查
+      const completeness = allRequirements.length / apiData.totalCount;
+      if (completeness < 0.9) {
+        log(phase, 'WARN', `"${poolName}" 翻页数据不完整`,
+          `collected=${allRequirements.length} totalCount=${apiData.totalCount} completeness=${(completeness * 100).toFixed(1)}%`);
+      }
     } else {
       allRequirements = apiData.result.map((r) => r.subject);
     }
 
+    // 去重：翻页期间数据变动可能导致同一需求出现在多页中
+    const uniqueReqs = [...new Set(allRequirements)];
+    if (uniqueReqs.length < allRequirements.length) {
+      log(phase, 'WARN', `"${poolName}" 翻页数据重复`,
+        `collected=${allRequirements.length} unique=${uniqueReqs.length}`);
+      allRequirements = uniqueReqs;
+    }
+
     log(phase, 'INFO', `"${poolName}" 需求列表 (${allRequirements.length})`, allRequirements.map((r, i) => `${i + 1}. ${r}`).join('\n'));
+
+    // 翻页数据完整性校验
+    if (allRequirements.length !== apiData.totalCount) {
+      log(phase, 'WARN', `"${poolName}" 翻页数据不完整`,
+        `collected=${allRequirements.length} totalCount=${apiData.totalCount}，正式运行时会跳过变化检测`);
+    }
 
     const newSnapshot: PoolSnapshot = { poolName, totalCount: apiData.totalCount, requirements: allRequirements };
 
@@ -352,6 +509,11 @@ export class TestRunner {
 
     const change = detectChanges(oldSnapshot, newSnapshot);
     if (change) {
+      // 分页残留误报特征检测
+      if (change.removed.length >= pageSize * 0.8 && change.added.length <= 5) {
+        log(phase, 'WARN', `"${poolName}" 疑似分页残留误报`,
+          `removed=${change.removed.length}（接近 pageSize=${pageSize}），可能仅获取了部分页数据`);
+      }
       log(phase, 'INFO', `"${poolName}" 检测到变化`, formatChange(change));
     } else {
       log(phase, 'PASS', `"${poolName}" 无变化`);
@@ -414,7 +576,10 @@ export class TestRunner {
       const countText = card.querySelector('.dw-pool-card-count')?.textContent?.trim() ?? '-';
       const expectedCount = snapshots[name]?.totalCount;
       const match = expectedCount !== undefined && String(expectedCount) === countText;
-      log('UI', match ? 'PASS' : 'FAIL', `卡片 "${name}"`, `显示=${countText} 快照=${expectedCount ?? '无'}`);
+      const dot = card.querySelector('.dw-pool-card-dot') as HTMLElement | null;
+      const dotColor = dot?.style.background ?? 'none';
+      log('UI', match ? 'PASS' : 'FAIL', `卡片 "${name}"`,
+        `count: 显示=${countText} 快照=${expectedCount ?? '无'} dot=${dotColor}`);
     });
 
     // 5. 状态栏
@@ -441,7 +606,28 @@ export class TestRunner {
     const noDrag = shadow.querySelector('[data-no-drag]');
     log('UI', dragHandle ? 'PASS' : 'FAIL', '拖拽手柄', `data-drag-handle=${!!dragHandle} data-no-drag=${!!noDrag}`);
 
-    // 8b. touch-action 验证：drag-handle 应为 none，滚动容器不应为 none
+    // 8b. user-select 验证：内容区域可选中复制，交互元素不可选
+    const contentArea = shadow.querySelector('.dw-content') as HTMLElement | null;
+    if (contentArea) {
+      const contentUS = getComputedStyle(contentArea).userSelect;
+      log('UI', contentUS === 'text' ? 'PASS' : 'FAIL', '内容区 user-select',
+        `expected="text" actual="${contentUS}"（需求名称需要可复制）`);
+    }
+    const titlebarEl = shadow.querySelector('.dw-titlebar') as HTMLElement | null;
+    if (titlebarEl) {
+      const titleUS = getComputedStyle(titlebarEl).userSelect;
+      log('UI', titleUS === 'none' ? 'PASS' : 'WARN', '标题栏 user-select',
+        `expected="none" actual="${titleUS}"（拖拽区域应禁止选中）`);
+    }
+    const panelUS = panel ? getComputedStyle(panel).userSelect : '';
+    if (panelUS === 'none') {
+      log('UI', 'FAIL', '面板 user-select',
+        `actual="none"（全局禁止选中会导致内容不可复制）`);
+    } else {
+      log('UI', 'PASS', '面板 user-select', `actual="${panelUS}"（未全局禁止）`);
+    }
+
+    // 8c. touch-action 验证：drag-handle 应为 none，滚动容器不应为 none
     if (dragHandle) {
       const handleTA = getComputedStyle(dragHandle as Element).touchAction;
       log('UI', handleTA === 'none' ? 'PASS' : 'FAIL', 'drag-handle touch-action',
@@ -509,19 +695,52 @@ export class TestRunner {
     log('UI', !afterChart.chartCollapsed && afterChart.changesCollapsed && afterChart.historyCollapsed ? 'PASS' : 'WARN',
       '手风琴-展开图表', `chart=${!afterChart.chartCollapsed} changes=${!afterChart.changesCollapsed} history=${!afterChart.historyCollapsed}`);
 
-    // 需求变化时间戳显示
+    // 需求变化 section 详细验证
     store.setState({ changesCollapsed: false, chartCollapsed: true, historyCollapsed: true });
     await sleep(100);
-    const changesEntries = shadow.querySelectorAll('.dw-changes-entry');
-    const changesTimeEls = shadow.querySelectorAll('.dw-changes-time');
     const storeChanges = store.getState().changes;
     if (storeChanges.length > 0) {
+      // 变化条目 & 时间戳
+      const changesEntries = shadow.querySelectorAll('.dw-changes-entry');
+      const changesTimeEls = shadow.querySelectorAll('.dw-changes-time');
       log('UI', changesEntries.length > 0 ? 'PASS' : 'FAIL', '需求变化条目',
         `entries=${changesEntries.length} storeChanges=${storeChanges.length}`);
       log('UI', changesTimeEls.length > 0 ? 'PASS' : 'FAIL', '需求变化时间戳',
         `timeElements=${changesTimeEls.length} firstText="${changesTimeEls[0]?.textContent}"`);
+
+      // 池分组标题 & 颜色标识
+      const poolHeaders = shadow.querySelectorAll('.dw-changes-pool-header');
+      log('UI', poolHeaders.length > 0 ? 'PASS' : 'FAIL', '变化池标题',
+        `poolHeaders=${poolHeaders.length}`);
+      poolHeaders.forEach(header => {
+        const headerEl = header as HTMLElement;
+        const name = headerEl.querySelector('.dw-changes-pool-name')?.textContent?.trim() ?? '';
+        const dot = headerEl.querySelector('.dw-history-pool-dot') as HTMLElement | null;
+        const hasBorderLeft = headerEl.style.borderLeft?.includes('solid');
+        const hasDot = dot && dot.style.background;
+        log('UI', hasBorderLeft && hasDot ? 'PASS' : 'WARN', `池标题 "${name}"`,
+          `borderLeft=${hasBorderLeft} dot=${!!hasDot}`);
+      });
+
+      // 新增/移除区块
+      const addedBlocks = shadow.querySelectorAll('.dw-changes-block.added');
+      const removedBlocks = shadow.querySelectorAll('.dw-changes-block.removed');
+      log('UI', 'INFO', '变化区块', `added=${addedBlocks.length} removed=${removedBlocks.length}`);
+
+      // 计数差值显示
+      const countDiffs = shadow.querySelectorAll('.dw-changes-count-diff');
+      log('UI', countDiffs.length > 0 ? 'PASS' : 'WARN', '计数差值显示',
+        `countDiffElements=${countDiffs.length} firstText="${countDiffs[0]?.textContent?.trim()}"`);
+
+      // 需求名可选中验证（在 li 元素上）
+      const changeLi = shadow.querySelector('.dw-changes-list li') as HTMLElement | null;
+      if (changeLi) {
+        const liUS = getComputedStyle(changeLi).userSelect;
+        log('UI', liUS !== 'none' ? 'PASS' : 'FAIL', '需求名可选中',
+          `user-select="${liUS}"（应允许复制需求名）`);
+      }
     } else {
-      log('UI', 'INFO', '无需求变化数据，跳过时间戳验证');
+      log('UI', 'INFO', '无需求变化数据，跳过变化 section 验证');
     }
 
     // 需求变化 section 内部滚动
@@ -595,6 +814,18 @@ export class TestRunner {
   private async phaseNotification() {
     store.setState({ status: '🧪 Phase 7: 通知测试...' });
 
+    // 前置检查：扩展上下文
+    if (!isContextValid()) {
+      log('Notification', 'FAIL', '扩展上下文已失效', '通知将无法发送（chrome.runtime.sendMessage 会抛出 Extension context invalidated）');
+      return;
+    }
+    log('Notification', 'PASS', '扩展上下文有效');
+
+    // 通知权限检查
+    if (typeof Notification !== 'undefined') {
+      log('Notification', 'INFO', '通知权限', `Notification.permission="${Notification.permission}"`);
+    }
+
     const testChange: PoolChange = {
       poolName: '测试通知',
       oldCount: 0,
@@ -608,7 +839,10 @@ export class TestRunner {
       await sendNotification(testChange);
       log('Notification', 'PASS', '桌面通知发送成功');
     } catch (err) {
-      log('Notification', 'FAIL', '桌面通知发送失败', (err as Error).message);
+      const msg = (err as Error).message;
+      const isContextError = msg.includes('Extension context invalidated');
+      log('Notification', 'FAIL', '桌面通知发送失败',
+        `${msg}${isContextError ? '（扩展已重新加载，需刷新页面）' : ''}`);
     }
 
     try {
@@ -624,28 +858,215 @@ export class TestRunner {
     store.setState({ status: '🧪 Phase 8: IndexedDB...' });
 
     try {
+      // ── 历史记录健康检查 ──
       const historyCount = await db.getHistoryCount();
-      log('IndexedDB', 'PASS', '历史记录数', `count=${historyCount}`);
+      const historyOverLimit = historyCount > CONFIG.maxHistoryRecords;
+      log('IndexedDB', historyOverLimit ? 'WARN' : 'PASS', '历史记录数',
+        `count=${historyCount} max=${CONFIG.maxHistoryRecords}${historyOverLimit ? ' ⚠ 超出上限' : ''}`);
 
+      // ── 快照完整性检查 ──
       const snapshots = await db.getAllSnapshots();
       log('IndexedDB', 'PASS', '快照数', `count=${snapshots.length}`);
       for (const snap of snapshots) {
-        log('IndexedDB', 'INFO', `快照 "${snap.poolName}"`, `totalCount=${snap.totalCount} requirements=${snap.requirements.length}`);
+        const isPartial = snap.requirements.length < snap.totalCount;
+        const isTarget = CONFIG.targets.includes(snap.poolName);
+        const status = !isTarget ? 'WARN' : isPartial ? 'WARN' : 'PASS';
+        const detail = [
+          `totalCount=${snap.totalCount}`,
+          `requirements=${snap.requirements.length}`,
+          !isTarget ? '⚠ 非当前监控目标' : '',
+          isPartial ? `⚠ 数据不完整（缺 ${snap.totalCount - snap.requirements.length} 条，可能为分页未完成）` : '',
+        ].filter(Boolean).join(' ');
+        log('IndexedDB', status, `快照 "${snap.poolName}"`, detail);
       }
 
+      // ── 变化记录健康检查 ──
       const changesCount = await db.getChangesCount();
-      log('IndexedDB', 'PASS', '变化记录数', `count=${changesCount}`);
+      const changesOverLimit = changesCount > CONFIG.maxChangesRecords;
+      log('IndexedDB', changesOverLimit ? 'WARN' : 'PASS', '变化记录数',
+        `count=${changesCount} max=${CONFIG.maxChangesRecords}${changesOverLimit ? ' ⚠ 超出上限' : ''}`);
+
       if (changesCount > 0) {
-        const recentChanges = await db.getRecentChanges(5);
-        for (const c of recentChanges) {
-          log('IndexedDB', 'INFO', `变化 "${c.poolName}"`,
-            `id=${c.id} time=${new Date(c.timestamp).toISOString()} added=${c.added.length} removed=${c.removed.length}`);
+        const allChanges = await db.getRecentChanges(changesCount);
+
+        // 统计总条目数
+        let totalAdded = 0;
+        let totalRemoved = 0;
+        const suspiciousRecords: { id?: number; poolName: string; added: number; removed: number; time: string }[] = [];
+        const SUSPICIOUS_THRESHOLD = 20;
+
+        for (const c of allChanges) {
+          totalAdded += c.added.length;
+          totalRemoved += c.removed.length;
+          if (c.added.length >= SUSPICIOUS_THRESHOLD || c.removed.length >= SUSPICIOUS_THRESHOLD) {
+            suspiciousRecords.push({
+              id: c.id,
+              poolName: c.poolName,
+              added: c.added.length,
+              removed: c.removed.length,
+              time: new Date(c.timestamp).toISOString(),
+            });
+          }
+        }
+
+        const totalItems = totalAdded + totalRemoved;
+        log('IndexedDB', 'INFO', '变化记录总条目',
+          `records=${changesCount} totalAdded=${totalAdded} totalRemoved=${totalRemoved} totalItems=${totalItems}`);
+
+        // 按池分组统计
+        const poolStats = new Map<string, { records: number; added: number; removed: number }>();
+        for (const c of allChanges) {
+          const s = poolStats.get(c.poolName) ?? { records: 0, added: 0, removed: 0 };
+          s.records++;
+          s.added += c.added.length;
+          s.removed += c.removed.length;
+          poolStats.set(c.poolName, s);
+        }
+        for (const [pool, s] of poolStats) {
+          log('IndexedDB', 'INFO', `变化统计 "${pool}"`,
+            `records=${s.records} added=${s.added} removed=${s.removed}`);
+        }
+
+        // 可疑记录检测：单条变化含大量条目（initialCollect 部分快照 bug 的特征）
+        if (suspiciousRecords.length > 0) {
+          log('IndexedDB', 'WARN', `发现 ${suspiciousRecords.length} 条可疑变化记录`,
+            `单条 added/removed >= ${SUSPICIOUS_THRESHOLD} 可能为初始收集部分快照导致的误报`);
+          for (const r of suspiciousRecords.slice(0, 10)) {
+            log('IndexedDB', 'WARN', `可疑记录 id=${r.id}`,
+              `pool="${r.poolName}" added=${r.added} removed=${r.removed} time=${r.time}`);
+          }
+          if (suspiciousRecords.length > 10) {
+            log('IndexedDB', 'WARN', `... 还有 ${suspiciousRecords.length - 10} 条可疑记录`);
+          }
+        } else {
+          log('IndexedDB', 'PASS', '无可疑变化记录（所有记录条目数合理）');
+        }
+
+        // 对称误报检测：相邻记录中出现 A 被移除 → A 被新增的镜像模式
+        let mirrorCount = 0;
+        for (let i = 0; i < allChanges.length - 1; i++) {
+          const curr = allChanges[i];
+          const next = allChanges[i + 1];
+          if (curr.poolName !== next.poolName) continue;
+          const addedSet = new Set(curr.added);
+          const overlap = next.removed.filter(r => addedSet.has(r));
+          if (overlap.length >= SUSPICIOUS_THRESHOLD) mirrorCount++;
+          const removedSet = new Set(curr.removed);
+          const overlap2 = next.added.filter(a => removedSet.has(a));
+          if (overlap2.length >= SUSPICIOUS_THRESHOLD) mirrorCount++;
+        }
+        if (mirrorCount > 0) {
+          log('IndexedDB', 'WARN', `发现 ${mirrorCount} 对镜像误报`,
+            '相邻记录中同一批需求先被移除后被新增（或反之），为初始收集 bug 的典型特征');
+        }
+
+        // 分页残留误报检测：removed 数量接近 pageSize（80-100）且 added 很少
+        const PAGE_SIZE = 100;
+        let paginationFalseCount = 0;
+        for (const c of allChanges) {
+          if (c.removed.length >= PAGE_SIZE * 0.8 && c.added.length <= 5) {
+            paginationFalseCount++;
+          }
+        }
+        if (paginationFalseCount > 0) {
+          log('IndexedDB', 'WARN', `发现 ${paginationFalseCount} 条疑似分页残留误报`,
+            `removed≥${PAGE_SIZE * 0.8} 且 added≤5，特征为翻页后页面未重置到第 1 页`);
+        } else {
+          log('IndexedDB', 'PASS', '无分页残留误报特征');
+        }
+
+        // 初始收集误报检测：added 和 removed 数量都很大且接近
+        let initialFalseCount = 0;
+        for (const c of allChanges) {
+          if (c.added.length >= SUSPICIOUS_THRESHOLD && c.removed.length >= SUSPICIOUS_THRESHOLD) {
+            const ratio = Math.min(c.added.length, c.removed.length) / Math.max(c.added.length, c.removed.length);
+            if (ratio > 0.5) initialFalseCount++;
+          }
+        }
+        if (initialFalseCount > 0) {
+          log('IndexedDB', 'WARN', `发现 ${initialFalseCount} 条疑似初始收集误报`,
+            'added 和 removed 数量都很大且接近，特征为多页池首次收集时用部分数据做了比对');
+        }
+
+        // 最近 5 条变化详情
+        const recent = allChanges.slice(0, 5);
+        for (const c of recent) {
+          log('IndexedDB', 'INFO', `变化 id=${c.id} "${c.poolName}"`,
+            `time=${new Date(c.timestamp).toISOString()} added=${c.added.length} removed=${c.removed.length}`);
         }
       }
 
+      // ── 历史记录健康检查（排序 & 时间间隔 & 重复） ──
+      if (historyCount > 0) {
+        const recentHistory = await db.getHistory(0, Math.min(historyCount, 100));
+        // 时间排序验证：应为倒序（最新在前）
+        let orderIssues = 0;
+        for (let i = 0; i < recentHistory.length - 1; i++) {
+          if (recentHistory[i].timestamp < recentHistory[i + 1].timestamp) {
+            orderIssues++;
+          }
+        }
+        log('IndexedDB', orderIssues === 0 ? 'PASS' : 'FAIL', '历史记录排序',
+          `检查 ${recentHistory.length} 条，乱序 ${orderIssues} 处${orderIssues > 0 ? '（getHistory 的游标方向可能有误）' : ''}`);
+
+        // 连续记录时间间隔分析
+        if (recentHistory.length >= 2) {
+          const gaps: number[] = [];
+          for (let i = 0; i < recentHistory.length - 1; i++) {
+            gaps.push(recentHistory[i].timestamp - recentHistory[i + 1].timestamp);
+          }
+          const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+          const maxGap = Math.max(...gaps);
+          const minGap = Math.min(...gaps);
+          log('IndexedDB', 'INFO', '历史记录间隔',
+            `avg=${Math.round(avgGap / 1000)}s min=${Math.round(minGap / 1000)}s max=${Math.round(maxGap / 1000)}s（配置间隔 ${CONFIG.minInterval}-${CONFIG.maxInterval}s）`);
+          if (maxGap > CONFIG.maxInterval * 3 * 1000) {
+            log('IndexedDB', 'WARN', '历史记录存在大间隔',
+              `最大间隔 ${Math.round(maxGap / 1000)}s 超过配置最大间隔的 3 倍，可能发生过页面刷新或扩展重启`);
+          }
+        }
+
+        // 连续重复检测：相邻记录数据完全相同
+        let dupeCount = 0;
+        for (let i = 0; i < recentHistory.length - 1; i++) {
+          const a = recentHistory[i], b = recentHistory[i + 1];
+          if (JSON.stringify(a.pools) === JSON.stringify(b.pools)) {
+            dupeCount++;
+          }
+        }
+        if (dupeCount > recentHistory.length * 0.5) {
+          log('IndexedDB', 'WARN', '大量连续重复历史',
+            `${dupeCount}/${recentHistory.length} 条相邻记录 pools 数据相同，可能产生不必要的写入`);
+        }
+      }
+
+      // ── 快照需求名去重检查 ──
+      for (const snap of snapshots) {
+        const unique = new Set(snap.requirements);
+        if (unique.size < snap.requirements.length) {
+          const dupeCount = snap.requirements.length - unique.size;
+          log('IndexedDB', 'WARN', `快照 "${snap.poolName}" 重名需求`,
+            `${dupeCount} 条重名（总 ${snap.requirements.length} 条），变化检测可能因此失准`);
+        }
+      }
+
+      // ── 位置数据 ──
       const collapsedPos = await db.getPosition('collapsed');
       const expandedPos = await db.getPosition('expanded');
       log('IndexedDB', 'PASS', '位置数据', `collapsed=${JSON.stringify(collapsedPos)} expanded=${JSON.stringify(expandedPos)}`);
+
+      // 位置合理性检查
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      for (const [label, pos] of [['collapsed', collapsedPos], ['expanded', expandedPos]] as const) {
+        if (pos) {
+          const outOfBounds = pos.x < -200 || pos.y < -200 || pos.x > vw + 200 || pos.y > vh + 200;
+          if (outOfBounds) {
+            log('IndexedDB', 'WARN', `${label} 位置偏离视口`,
+              `(${pos.x}, ${pos.y}) viewport=${vw}x${vh}，下次打开可能看不到面板`);
+          }
+        }
+      }
     } catch (err) {
       log('IndexedDB', 'FAIL', 'IndexedDB 访问失败', (err as Error).message);
     }
@@ -660,10 +1081,161 @@ export class TestRunner {
       const used = Math.round(perf.memory.usedJSHeapSize / 1048576);
       const total = Math.round(perf.memory.totalJSHeapSize / 1048576);
       const limit = Math.round(perf.memory.jsHeapSizeLimit / 1048576);
+      const percent = Math.round((used / limit) * 100);
       log('Memory', 'PASS', '内存信息', `used=${used}MB total=${total}MB limit=${limit}MB configLimit=${CONFIG.memoryLimitMB}MB`);
+      if (used > CONFIG.memoryLimitMB * 0.8) {
+        log('Memory', 'WARN', '内存接近阈值',
+          `used=${used}MB（${percent}%），阈值=${CONFIG.memoryLimitMB}MB，超过后将触发自动刷新`);
+      }
     } else {
-      log('Memory', 'WARN', 'performance.memory 不可用');
+      log('Memory', 'WARN', 'performance.memory 不可用（非 Chromium 浏览器）');
     }
+  }
+
+  // ==================== Phase 10: 运行时健康检查 ====================
+  private async phaseRuntimeHealth() {
+    store.setState({ status: '🧪 Phase 10: 运行时健康检查...' });
+
+    // ── 1. 扩展上下文有效性 ──
+    const contextValid = isContextValid();
+    log('RuntimeHealth', contextValid ? 'PASS' : 'FAIL', '扩展上下文',
+      `chrome.runtime.id=${contextValid ? '有效' : '无效（扩展已被重新加载或卸载，将触发页面刷新）'}`);
+
+    // ── 2. API Bridge 状态一致性 ──
+    const lastTimestamp = this.apiBridge.getLastResponseTimestamp();
+    const cached = this.apiBridge.getLatest();
+    if (lastTimestamp > 0) {
+      const age = Math.round((Date.now() - lastTimestamp) / 1000);
+      log('RuntimeHealth', 'PASS', 'API Bridge 最后响应', `${age}s 前`);
+
+      // 验证 invalidateFreshness 不影响 getLastResponseTimestamp
+      const beforeInvalidate = this.apiBridge.getLastResponseTimestamp();
+      this.apiBridge.invalidateFreshness();
+      const afterInvalidate = this.apiBridge.getLastResponseTimestamp();
+      const isFreshAfter = this.apiBridge.isFresh();
+      log('RuntimeHealth', beforeInvalidate === afterInvalidate ? 'PASS' : 'FAIL',
+        'invalidateFreshness 隔离性',
+        `lastResponseTime: before=${beforeInvalidate} after=${afterInvalidate} isFresh=${isFreshAfter}（应为 false）`);
+      if (isFreshAfter) {
+        log('RuntimeHealth', 'FAIL', 'invalidateFreshness 未生效',
+          'isFresh() 仍返回 true，recovery.ts 超时计算可能产生大数字');
+      }
+    } else {
+      log('RuntimeHealth', 'WARN', 'API Bridge 无历史响应', '尚未收到任何 API 数据');
+    }
+
+    // ── 3. Recovery 超时计算验证 ──
+    if (lastTimestamp > 0) {
+      const elapsed = Date.now() - lastTimestamp;
+      const thresholdSec = Math.round(CONFIG.loadTimeoutThreshold / 1000);
+      if (elapsed > CONFIG.loadTimeoutThreshold) {
+        log('RuntimeHealth', 'WARN', 'Recovery 超时条件已满足',
+          `elapsed=${Math.round(elapsed / 1000)}s > threshold=${thresholdSec}s，正式运行时将触发页面刷新`);
+      } else {
+        log('RuntimeHealth', 'PASS', 'Recovery 超时正常',
+          `elapsed=${Math.round(elapsed / 1000)}s < threshold=${thresholdSec}s`);
+      }
+      if (elapsed > 1e9) {
+        log('RuntimeHealth', 'FAIL', 'Recovery 超时计算异常',
+          `elapsed=${elapsed}ms 值异常大，可能 lastResponseTimestamp 被错误重置`);
+      }
+    }
+
+    // ── 4. 分页 DOM 选择器可用性 ──
+    const nextBtn = document.querySelector(CONFIG.selectors.nextPageBtn);
+    const prevBtn = document.querySelector(CONFIG.selectors.prevPageBtn);
+    const loadingEl = document.querySelector(CONFIG.selectors.loadingIndicator);
+    const sidebarItems = document.querySelectorAll(CONFIG.selectors.sidebarMenuItem);
+    const activeCategory = document.querySelector(CONFIG.selectors.activeCategory);
+
+    log('RuntimeHealth', 'INFO', 'DOM 选择器检查',
+      [
+        `sidebarMenuItem: ${sidebarItems.length} 个`,
+        `activeCategory: ${activeCategory ? '存在' : '未找到'}`,
+        `nextPageBtn: ${nextBtn ? '存在' : '未找到'}`,
+        `prevPageBtn: ${prevBtn ? '存在' : '未找到'}`,
+        `loadingIndicator: ${loadingEl ? '存在' : '未找到'}`,
+      ].join('\n'));
+
+    if (nextBtn) {
+      const disabled = (nextBtn as HTMLElement).hasAttribute('disabled') ||
+        nextBtn.classList.contains('next-disabled');
+      log('RuntimeHealth', 'INFO', '翻页按钮状态', `nextBtn disabled=${disabled}`);
+    }
+
+    // ── 5. 分页状态快照 ──
+    const paginationItems = document.querySelectorAll('.next-pagination-item');
+    const currentPages: string[] = [];
+    paginationItems.forEach(el => {
+      const text = (el as HTMLElement).textContent?.trim() ?? '';
+      const isCurrent = el.classList.contains('next-current');
+      if (text && !el.classList.contains('next-next') && !el.classList.contains('next-prev')) {
+        currentPages.push(isCurrent ? `[${text}]` : text);
+      }
+    });
+    if (currentPages.length > 0) {
+      log('RuntimeHealth', 'INFO', '当前分页状态', `pages: ${currentPages.join(' ')}`);
+      const activePage = currentPages.find(p => p.startsWith('['));
+      if (activePage && activePage !== '[1]') {
+        log('RuntimeHealth', 'WARN', '分页未在第 1 页',
+          `当前在第 ${activePage} 页，下次检测可能获取到非首页数据`);
+      }
+    }
+
+    // ── 6. Store 状态一致性 ──
+    const state = store.getState();
+    const snapshotPoolNames = Object.keys(state.poolSnapshots);
+    const targetSet = new Set(CONFIG.targets);
+    const orphanSnapshots = snapshotPoolNames.filter(name => !targetSet.has(name));
+    if (orphanSnapshots.length > 0) {
+      log('RuntimeHealth', 'WARN', 'Store 孤立快照',
+        `${orphanSnapshots.join(', ')} 不在 CONFIG.targets 中，可能是旧配置残留`);
+    }
+    const missingSnapshots = CONFIG.targets.filter(t => !state.poolSnapshots[t]);
+    if (missingSnapshots.length > 0) {
+      log('RuntimeHealth', 'INFO', 'Store 缺少快照', `${missingSnapshots.join(', ')} 尚未完成首次检测`);
+    }
+
+    log('RuntimeHealth', 'INFO', 'Store 状态摘要',
+      `isMonitoring=${state.isMonitoring} currentRound=${state.currentRound} changes=${state.changes.length} historyTotal=${state.historyTotal}`);
+  }
+
+  // ==================== Summary ====================
+  private logTestSummary(startTime: number) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const allLogs = getLogs();
+
+    const fails = allLogs.filter(l => l.status === 'FAIL');
+    const warns = allLogs.filter(l => l.status === 'WARN');
+    const passes = allLogs.filter(l => l.status === 'PASS');
+
+    // 按 phase 分组统计
+    const phaseStats = new Map<string, { pass: number; fail: number; warn: number }>();
+    for (const entry of allLogs) {
+      if (entry.status === 'INFO') continue;
+      const s = phaseStats.get(entry.phase) ?? { pass: 0, fail: 0, warn: 0 };
+      if (entry.status === 'PASS') s.pass++;
+      if (entry.status === 'FAIL') s.fail++;
+      if (entry.status === 'WARN') s.warn++;
+      phaseStats.set(entry.phase, s);
+    }
+
+    log('Summary', 'INFO', '各阶段统计',
+      Array.from(phaseStats.entries())
+        .map(([phase, s]) => `${phase}: ✓${s.pass} ✗${s.fail} ⚠${s.warn}`)
+        .join('\n'));
+
+    if (fails.length > 0) {
+      log('Summary', 'FAIL', `发现 ${fails.length} 个失败项`,
+        fails.map(f => `[${f.phase}] ${f.message}`).join('\n'));
+    }
+    if (warns.length > 0) {
+      log('Summary', 'WARN', `发现 ${warns.length} 个警告项`,
+        warns.map(w => `[${w.phase}] ${w.message}`).join('\n'));
+    }
+
+    const result = fails.length === 0 ? 'PASS' : 'FAIL';
+    log('Summary', result, `测试完成: ✓${passes.length} ✗${fails.length} ⚠${warns.length}，耗时 ${elapsed}s`);
   }
 }
 

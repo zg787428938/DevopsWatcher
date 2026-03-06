@@ -38,7 +38,7 @@ npx tsc --noEmit                   # 类型检查
 │           │ chrome.runtime.sendMessage                           │
 ├───────────┼─────────────────────────────────────────────────────┤
 │  Background Service Worker (background.js)                      │
-│  仅代理桌面通知（chrome.notifications）                           │
+│  代理桌面通知 + 关闭测试标签页                                     │
 ├─────────────────────────────────────────────────────────────────┤
 │  Popup (popup.html + popup.js)                                  │
 │  监控开关 / 开始测试 / 下载日志 / 重置位置                        │
@@ -55,32 +55,36 @@ src/
 ├── config.ts              # 全局配置参数（间隔、选择器、阈值等）+ 工具函数
 ├── types.ts               # 所有 TypeScript 接口定义
 ├── store.ts               # 发布-订阅状态管理（驱动 React UI）
+├── lib/
+│   └── utils.ts           # cn() 工具函数（clsx + tailwind-merge）
+├── vite-env.d.ts          # Vite 类型声明（*.css?inline）
 ├── inject/
 │   └── index.ts           # 页面上下文 API 劫持（独立构建为 IIFE）
 ├── background/
-│   └── index.ts           # Service Worker（通知代理）
+│   └── index.ts           # Service Worker（通知代理 + 关闭标签页）
 ├── popup/
 │   ├── index.html         # Popup HTML
 │   └── index.ts           # Popup 逻辑（开关/测试/下载日志/重置位置）
 └── content/
     ├── index.tsx           # Content Script 入口（两阶段初始化）
     ├── services/
-    │   ├── api-bridge.ts   # API 数据桥接（缓存 + 异步等待）
+    │   ├── api-bridge.ts   # API 数据桥接（缓存 + 异步等待 + 新鲜度隔离）
     │   ├── countdown.ts    # 倒计时调度（wall-clock + 均匀分布）
     │   ├── db.ts           # IndexedDB 封装（快照/历史/变化/位置 四类数据，DB v2）
-    │   ├── logger.ts       # 统一日志服务（正式/测试模式共享，上限 2000 条）
+    │   ├── logger.ts       # 统一日志服务（正式/测试模式共享，上限 2000 条，getLogs() 供 Summary 使用）
     │   ├── memory.ts       # JS 堆内存监控
-    │   └── notification.ts # 桌面通知 + Web Audio 蜂鸣音
+    │   └── notification.ts # 桌面通知 + Web Audio 蜂鸣音（上下文有效性预检）
     ├── engine/
-    │   ├── monitor.ts      # 监控核心编排器
+    │   ├── monitor.ts      # 监控核心编排器（分页回退 + 数据完整性校验 + 去重）
     │   ├── scanner.ts      # 侧边栏菜单 DOM 扫描（带坐标缓存）
     │   ├── waiter.ts       # 三段式内容就绪等待
     │   ├── detector.ts     # 快照比对（新增/移除检测）
     │   ├── pagination.ts   # 模拟翻页收集全量数据
     │   ├── click.ts        # 模拟真实用户点击（Pointer+Mouse 事件序列）
-    │   ├── recovery.ts     # 异常恢复（内存超限/API 超时自动刷新）
-    │   └── test-runner.ts  # 诊断测试套件（9 Phase）
+    │   ├── recovery.ts     # 异常恢复（内存超限/API 超时/上下文失效自动刷新）
+    │   └── test-runner.ts  # 诊断测试套件（10 Phase + Summary）
     └── ui/
+        ├── globals.css     # Tailwind CSS 指令 + shadcn CSS 变量（:host 作用域）
         ├── App.tsx         # 根组件（展开/收起切换 + 位置持久化）
         ├── FloatingBall.tsx # 悬浮球（倒计时进度环）
         ├── Panel.tsx       # 展开面板（互斥折叠区域容器）
@@ -113,7 +117,8 @@ src/
       → 生成随机间隔 T（60~120 秒）
       → 生成操作序列：每个池的每一页各为一个操作
       → 操作[i] 在 T*(i+1)/(totalOps+1) 秒偏移触发（首尾留缓冲）
-      → checkPool: simulateClick → waitForContentReady → waitForFreshResponse → processPoolData
+      → checkPool: simulateClick → waitForContentReady → waitForFreshResponse → finalizePool
+      → finalizePool: 去重 → 数据完整性校验 → 快照比对 → 通知
       → 所有池检完 → onRoundComplete → 写入历史 + 变化 → 开始下一轮
 ```
 
@@ -212,7 +217,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 | 方向 | 机制 | 消息类型 |
 |---|---|---|
 | inject → content | `window.postMessage` | `DEVOPS_WATCHER_API_RESPONSE` |
-| content → background | `chrome.runtime.sendMessage` | `CREATE_NOTIFICATION` |
+| content → background | `chrome.runtime.sendMessage` | `CREATE_NOTIFICATION` / `CLOSE_TAB` |
 | popup → content | `chrome.tabs.sendMessage` | `QUERY_STATE` / `SET_MONITORING` / `DOWNLOAD_LOG` / `RESET_POSITION` |
 
 ---
@@ -222,8 +227,9 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 正式监控和测试模式共享同一个 `Logger` 实例（单例）。每条日志包含 `time`、`phase`、`status`（PASS/FAIL/INFO/WARN）、`message`、`detail`。
 
 - 上限 `MAX_ENTRIES = 2000`，超出时丢弃最早记录
-- 正式模式下记录关键事件（池切换、变化检测、翻页、错误）
+- 正式模式下记录关键事件（池切换、变化检测、翻页、异常恢复、内存超限、上下文失效等）
 - 测试模式下记录完整诊断信息
+- `getLogs()` 接口供 TestRunner 在运行时读取日志生成结构化 Summary
 - 通过 Popup「下载日志」按钮随时导出为 `.log` 文本文件
 
 ---
@@ -232,21 +238,23 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 
 通过 Popup 点击「开始测试」触发：关闭当前标签页，新开标签页（URL 追加 `_dwtest=1`）。content script 检测到此参数后运行 `TestRunner` 而非 `Monitor`。
 
-分 9 个 Phase（全部使用真实数据和真实交互）：
+分 10 个 Phase + Summary（全部使用真实数据和真实交互）：
 
 | Phase | 名称 | 说明 |
 |---|---|---|
-| 1 | Environment | URL、UA、CONFIG（含 `maxChangesRecords`）、Shadow DOM、激活状态 |
-| 2 | API | API 拦截功能验证 |
+| 1 | Environment | URL、UA、版本号、CONFIG、Shadow DOM、激活状态、inject.js 注入验证 |
+| 2 | API | API 拦截验证 + 数据结构校验（totalCount/result/toPage/pageSize/subject） |
 | 3 | Scanner | 侧边栏菜单扫描 |
-| 4 | InitialCollect | 仅提取当前页面数据（验证 `initialPoolIndex` 跳过逻辑） |
-| 5 | CountdownRound | 完整倒计时轮询（验证均匀分布公式 + skipIndices） |
-| 6 | UI | 悬浮球/面板/卡片/滚动/视口可见性/变化时间戳显示 |
-| 7 | Notification | 桌面通知 + 蜂鸣音 |
-| 8 | IndexedDB | 快照/历史/变化/位置持久化 |
-| 9 | Memory | JS 堆内存 |
+| 4 | InitialCollect | 当前页面数据提取 + 多页感知（非首页时跳过快照保存避免误报） |
+| 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 |
+| 6 | UI | 悬浮球/面板/卡片点色/变化区块结构/数量差值/文字可选择性 |
+| 7 | Notification | 上下文有效性预检 + 桌面通知 + 蜂鸣音 + 权限状态 |
+| 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性 |
+| 9 | Memory | JS 堆内存 + 80% 阈值预警 |
+| 10 | RuntimeHealth | 扩展上下文/API Bridge 一致性/Recovery 计算/DOM 选择器/分页状态/Store 状态 |
+| — | Summary | 按 Phase 汇总 PASS/FAIL/WARN 计数，列出所有 FAIL 和 WARN 详情 |
 
-测试完成后自动下载 `.log` 日志文件。测试与正式监控互斥。
+测试完成后自动下载 `.log` 日志文件，然后通过 Background 关闭测试标签页。测试与正式监控互斥。
 
 ---
 
@@ -262,6 +270,10 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 | `src/popup/index.ts` | IIFE | `dist/popup.js` | — |
 
 构建后自动复制 `manifest.json`、`popup.html`、`public/` 到 `dist/`。
+
+**版本自动递增**：每次 `npm run build` 自动将 `manifest.json` 和 `package.json` 的 patch 版本号 +1（如 `1.0.8` → `1.0.9`），并将改动写回源文件。
+
+**Tailwind CSS 处理**：Content Script 构建使用自定义 `cssInlinePlugin`，将 `?inline` 后缀的 CSS 文件通过 PostCSS + Tailwind 处理后内联为 JS 字符串，注入 Shadow DOM。
 
 `NODE_ENV=production` 的差异：
 - 启用 minify（esbuild 压缩）
@@ -279,6 +291,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 | `.teamix-cloud-sidebar-side-filter-menu-item` | 侧边栏菜单项 |
 | `[class*='workitemList--workitemCategory']` | 当前激活的需求池标题 |
 | `.next-btn.next-medium.next-btn-normal.next-pagination-item.next-next` | 分页"下一页"按钮 |
+| `.next-btn.next-medium.next-btn-normal.next-pagination-item.next-prev` | 分页"上一页"按钮（分页回退用） |
 | `.next-loading` | 加载中指示器 |
 
 ---
@@ -300,6 +313,18 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 ### 为什么折叠区域互斥展开（手风琴模式）？
 趋势图表、需求变化、历史记录三个区域展开时各自可能占据大量高度。如果同时展开，面板总高度会远超视口，用户需要在外层滚动条和内层滚动条之间来回操作。互斥模式确保任一时刻只有一个区域展开，消除嵌套滚动问题。
 
+### 为什么 finalizePool 要做数据完整性校验？
+多页需求池翻页时可能因 DOM 状态残留、网络波动等原因导致某一页数据丢失。如果将不完整的数据保存为快照并与上次比对，会产生大量虚假的"需求被移除"变化。`finalizePool` 在保存快照前检查 `collected !== totalCount`，不匹配时跳过本轮变化检测并保留旧快照，避免级联误报。
+
+### 为什么 handleFirstPage 要检查分页状态？
+云效 SPA 切换需求池时不一定重置分页状态。如果上一个池停留在第 2 页，切换到新池后 API 可能返回 `toPage=2` 的数据。`handleFirstPage` 检测到 `toPage > 1` 时，通过模拟点击分页控件回到第 1 页，然后重新获取数据，确保从正确的起始位置收集。
+
+### 为什么 safeRefresh 不用 location.reload()？
+云效是 SPA 应用，某些情况下浏览器可能忽略 `reload()` 或从缓存恢复。通过 `window.location.href` 赋值附带时间戳参数（`_dw=timestamp`），强制生成一个新的 URL 导航请求。此方法同时处理了 hash 路由中 `?` 出现在 `#` 之后的特殊情况。
+
+### 为什么测试完成后通过 Background 关闭标签页？
+浏览器安全策略限制 `window.close()` 只能关闭由 `window.open()` 打开的窗口。测试标签页由 `chrome.tabs.create()` 创建，必须通过 `chrome.tabs.remove()` 关闭，而该 API 只在 Background Service Worker 中可用。因此 content script 发送 `CLOSE_TAB` 消息给 Background 完成关闭。
+
 ### 拖拽边界检测
 以元素中心为锚点：中心点不超出视口即可，元素可部分露出边缘。公式：`x ∈ [-width/2, vw - width/2]`。展开和收起状态分别维护独立位置坐标，持久化到 IndexedDB。
 
@@ -311,6 +336,7 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 2. **URL 激活条件**：`shouldActivate()` 检查 `location.href.includes('?')`。云效使用 hash 路由，`?` 出现在 `#` 之后。如果云效改变 URL 结构去掉 `?`，扩展会静默失活。更健壮的方案是检查 `location.pathname` 前缀。
 3. **多标签页监控状态独立**：`isMonitoring` 通过 `localStorage` 持久化（同源共享），刷新后自动恢复。但多标签页共享同一个 `localStorage` key，一个标签页的开关操作会影响其他标签页刷新后的初始状态。
 4. **图标**：由 `scripts/generate-icons.mjs` 程序化生成（蓝色圆形 + 白色 D），也可替换为自定义 PNG（128×128，透明背景），放入 `public/icons/` 后重新构建。
+5. **分页数据非原子性**：多页收集过程中如果需求池发生变化，各页数据可能不一致。通过完整性校验（`collected === totalCount`）兜底，不一致时跳过本轮。
 
 ---
 
@@ -339,7 +365,7 @@ Content Script 未初始化完成时 `chrome.tabs.sendMessage` 会抛异常。Po
 `waitForContentReady()` 始终 resolve（不会 reject）。之后 `apiBridge.waitForFreshResponse(clickTime, 15s)` 等待 API 数据，超时进入重试循环（最多 `apiWaitMaxRetries=3` 次，每次重新点击菜单项并等待 `apiWaitRetryInterval=5s`）。全部失败后该池本轮跳过，不中断后续池和后续轮次。
 
 **Q: recovery.ts 刷新后的状态恢复？**
-`location.reload()` 后 content script 重新执行两阶段初始化。`monitor.start()` 从 IndexedDB 恢复快照、历史、变化、位置。`isMonitoring` 从 `localStorage` 恢复（用户手动关闭后刷新不会重新开启）。若 URL 含 `?` 且未被用户明确关闭，监控自动恢复。
+`safeRefresh()` 通过 `window.location.href` 赋值带时间戳参数（`_dw=Date.now()`）强制导航（非 `location.reload()`，避免 SPA 忽略刷新）。刷新后 content script 重新执行两阶段初始化。`monitor.start()` 从 IndexedDB 恢复快照、历史、变化、位置。`isMonitoring` 从 `localStorage` 恢复（用户手动关闭后刷新不会重新开启）。若 URL 含 `?` 且未被用户明确关闭，监控自动恢复。
 
 ### 测试与调试
 
@@ -347,7 +373,7 @@ Content Script 未初始化完成时 `chrome.tabs.sendMessage` 会抛异常。Po
 Phase 4 建立首次快照（无旧快照 → `detectChanges` 返回 null → PASS）；Phase 5 再次检测同一池（有旧快照 → 比对结果无论有无变化都记录详情）。日志完整列出需求列表和旧快照，供人工比对。
 
 **Q: `_dwtest=1` 参数残留？**
-测试完成后标签页保留。设计意图：用户可观察最终 UI 状态、随时通过 Popup 再次下载日志。
+测试完成后自动下载日志文件，然后通过 `CLOSE_TAB` 消息通知 Background 关闭标签页。如果关闭失败（如 Background 未响应），标签页保留，用户可手动关闭。
 
 **Q: Chrome 后台标签页节流对监控的影响？**
 Chrome 会将不可见标签页的 `setInterval` 节流至 1 分钟一次。由于使用 wall-clock 计算偏移，当标签页恢复可见时，所有已到期操作会在下一次 `tick()` 中依次触发。操作可能因此在短时间内密集执行，但不会丢失。

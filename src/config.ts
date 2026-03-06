@@ -86,6 +86,8 @@ export const CONFIG = {
     activeCategory: "[class*='workitemList--workitemCategory']",
     // 分页"下一页"按钮：用于模拟翻页操作收集所有分页数据
     nextPageBtn: ".next-btn.next-medium.next-btn-normal.next-pagination-item.next-next",
+    // 分页"上一页"按钮：回退到第 1 页时使用（翻页残留状态修复）
+    prevPageBtn: ".next-btn.next-medium.next-btn-normal.next-pagination-item.next-prev",
     // 加载中指示器：用于判断页面内容是否就绪（Fusion Design 的 loading 组件）
     loadingIndicator: ".next-loading",
   },

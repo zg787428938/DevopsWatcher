@@ -4,6 +4,7 @@
 
 import { CONFIG, getRandomInterval } from '../../config';
 import { store } from '../../store';
+import { log } from './logger';
 
 type OperationCallback = (poolIndex: number, pageIndex: number) => Promise<void>;
 type RoundCompleteCallback = () => void;
@@ -84,7 +85,10 @@ export class CountdownService {
           op.triggered = true;
           this.isBusy = true;
           this.onOperation(op.poolIndex, op.pageIndex)
-            .catch(err => console.error('[DevOps Watcher] Operation failed:', err))
+            .catch(err => {
+              const poolName = CONFIG.targets[op.poolIndex] ?? `pool#${op.poolIndex}`;
+              log('Countdown', 'FAIL', `操作执行异常: ${poolName} P${op.pageIndex + 1}`, (err as Error).message);
+            })
             .finally(() => { this.isBusy = false; });
           break;
         }

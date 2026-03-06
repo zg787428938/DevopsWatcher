@@ -3,12 +3,34 @@
  */
 import { build } from 'vite';
 import react from '@vitejs/plugin-react';
-import { cpSync, existsSync, readFileSync } from 'fs';
+import tailwindcss from 'tailwindcss';
+import autoprefixer from 'autoprefixer';
+import postcss from 'postcss';
+import { cpSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
-// 在 ESM 中获取 __dirname 等价物，用于解析相对路径
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function cssInlinePlugin() {
+  return {
+    name: 'css-inline',
+    resolveId(source, importer) {
+      if (source.endsWith('.css?inline') && importer) {
+        const cssPath = resolve(dirname(importer), source.replace('?inline', ''));
+        return '\0css-inline:' + cssPath;
+      }
+    },
+    async load(id) {
+      if (!id.startsWith('\0css-inline:')) return null;
+      const cssPath = id.slice('\0css-inline:'.length);
+      const css = readFileSync(cssPath, 'utf-8');
+      const result = await postcss([tailwindcss(), autoprefixer()])
+        .process(css, { from: cssPath });
+      return `export default ${JSON.stringify(result.css)};`;
+    },
+  };
+}
 // 根据 NODE_ENV 决定是否压缩输出，production 时启用 minify
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -22,7 +44,12 @@ async function buildExtension() {
   console.log('Building content script...');
   await build({
     configFile: false,
-    plugins: [react()],
+    plugins: [react(), cssInlinePlugin()],
+    resolve: {
+      alias: {
+        '@': resolve(__dirname, 'src'),
+      },
+    },
     build: {
       outDir: 'dist',
       emptyOutDir: true,
@@ -103,16 +130,29 @@ async function buildExtension() {
     },
   });
 
-  // 将 manifest.json 和 popup 的 HTML 复制到 dist 目录
+  // 递增 patch 版本号并同步到 manifest.json 和 package.json
+  const manifestPath = resolve(__dirname, 'manifest.json');
+  const packagePath = resolve(__dirname, 'package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+  const pkg = JSON.parse(readFileSync(packagePath, 'utf-8'));
+
+  const parts = manifest.version.split('.').map(Number);
+  parts[2] = (parts[2] || 0) + 1;
+  const newVersion = parts.join('.');
+
+  manifest.version = newVersion;
+  pkg.version = newVersion;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + '\n');
+
   cpSync('manifest.json', 'dist/manifest.json');
   cpSync('src/popup/index.html', 'dist/popup.html');
 
-  // 若存在 public 目录，则递归复制其内容到 dist，用于静态资源
   if (existsSync('public')) {
     cpSync('public', 'dist', { recursive: true });
   }
 
-  console.log('Build complete! Output in dist/');
+  console.log(`Build complete! v${newVersion} → dist/`);
 }
 
 // 执行构建，失败时打印错误并退出进程

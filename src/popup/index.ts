@@ -11,7 +11,7 @@ async function init() {
   let isTesting = false;
   let connected = false;
 
-  if (tabId && tabUrl) {
+  if (tabId) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, { type: 'QUERY_STATE' });
       if (response) {
@@ -45,7 +45,7 @@ async function init() {
       <button class="secondary-btn" id="reset-pos-btn" ${disabled ? 'disabled' : ''}>↺ 重置位置</button>
     </div>
     <div class="status" id="status-text">
-      ${!connected ? '⏸️ 未连接' : isTesting ? '⏳ 测试标签页已打开' : isMonitoring ? '✅ 监控运行中' : '⏸️ 监控已暂停'}
+      ${!connected ? '⚠ 未连接 · 请刷新页面' : isTesting ? '⏳ 测试标签页已打开' : isMonitoring ? '✅ 监控运行中' : '⏸️ 监控已暂停'}
     </div>
   `;
 

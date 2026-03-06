@@ -12,20 +12,19 @@ type ResponseWaiter = {
 };
 
 export class ApiBridge {
-  private latest: CachedApiResponse | null = null; // 最近一次拦截到的 API 响应
-  private waiters: ResponseWaiter[] = []; // 当前等待 API 响应的回调队列
+  private latest: CachedApiResponse | null = null;
+  private waiters: ResponseWaiter[] = [];
+  // 真实的最后响应时间戳，不受 invalidateFreshness() 影响，供 recovery.ts 使用
+  private lastRealResponseTime = 0;
 
-  // 开始监听 window message，必须在 content script 初始化时调用
   start() {
     window.addEventListener('message', (event) => {
-      // 安全校验：只处理来自当前窗口且类型匹配的消息，防止跨 iframe 干扰
       if (event.source !== window) return;
       if (event.data?.type !== 'DEVOPS_WATCHER_API_RESPONSE') return;
       this.handleResponse(event.data.data, event.data.url);
     });
   }
 
-  // 处理收到的 API 响应：更新缓存并唤醒所有满足时间条件的等待者
   private handleResponse(data: ApiResponseData, url: string) {
     const cached: CachedApiResponse = {
       data,
@@ -33,8 +32,8 @@ export class ApiBridge {
       url,
     };
     this.latest = cached;
+    this.lastRealResponseTime = cached.timestamp;
 
-    // 遍历等待队列，resolve 所有 afterTimestamp 早于当前响应时间戳的等待者
     const resolved: ResponseWaiter[] = [];
     for (const w of this.waiters) {
       if (cached.timestamp > w.afterTimestamp) {
@@ -46,23 +45,20 @@ export class ApiBridge {
     this.waiters = this.waiters.filter((w) => !resolved.includes(w));
   }
 
-  // 获取最近一次缓存的 API 响应（可能为 null）
   getLatest(): CachedApiResponse | null {
     return this.latest;
   }
 
-  // 判断缓存的 API 数据是否在 maxAgeMs 毫秒内（默认使用 apiFreshnessThreshold 2秒）
   isFresh(maxAgeMs: number = CONFIG.apiFreshnessThreshold): boolean {
     return this.latest !== null && Date.now() - this.latest.timestamp < maxAgeMs;
   }
 
-  // 返回最后一次收到 API 响应的时间戳，用于 recovery.ts 判断 API 超时
+  // 返回最后一次真实收到 API 响应的时间戳，不受 invalidateFreshness() 影响
   getLastResponseTimestamp(): number {
-    return this.latest?.timestamp ?? 0;
+    return this.lastRealResponseTime;
   }
 
-  // 使缓存的新鲜度失效：将时间戳设为 0，使 isFresh() 返回 false
-  // 切换需求池前调用，防止 waiter 误将上一个池的旧数据视为"就绪"而跳过等待
+  // 仅使新鲜度判断失效（isFresh 返回 false），不影响 getLastResponseTimestamp
   invalidateFreshness(): void {
     if (this.latest) {
       this.latest = { ...this.latest, timestamp: 0 };

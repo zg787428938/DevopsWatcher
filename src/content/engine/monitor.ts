@@ -76,9 +76,13 @@ export class Monitor {
 
     const activeChanges = changes.filter(c => targetSet.has(c.poolName));
 
+    const historyTotal = await db.getHistoryCount();
+    const changesCount = await db.getChangesCount();
+    log('Monitor', 'INFO', 'IndexedDB 已加载', `history=${historyTotal} snapshots=${snapshots.length} changes=${changesCount}`);
+
     store.setState({
       history,
-      historyTotal: await db.getHistoryCount(),
+      historyTotal,
       poolSnapshots: snapshotMap,
       changes: activeChanges,
       ...(collapsedPos ? { collapsedPos } : {}),
@@ -113,8 +117,23 @@ export class Monitor {
       const idx = CONFIG.targets.indexOf(currentPool);
       log('InitialCollect', 'INFO', `当前页面在目标池 "${currentPool}" (index=${idx}) 上，提取数据`);
       store.setState({ status: `初始化: 提取 ${currentPool} 数据...`, statusType: 'normal' });
-      const requirements = initialData.result.map(r => r.subject);
-      await this.finalizePool(currentPool, initialData.totalCount, requirements);
+
+      const pageSize = initialData.pageSize || 100;
+      const totalPages = Math.ceil(initialData.totalCount / pageSize);
+
+      if (totalPages > 1) {
+        // 多页池：当前只有第 1 页数据，保存部分快照会导致误判变化
+        // 跳过快照保存，由后续轮次完整翻页后再比对
+        log('InitialCollect', 'INFO', `"${currentPool}" 有 ${totalPages} 页，跳过部分快照保存`);
+      } else {
+        // 单页池：数据完整，直接保存为基准快照（不做变化检测，避免刷新后误报）
+        const requirements = initialData.result.map(r => r.subject);
+        const snapshot: PoolSnapshot = { poolName: currentPool, totalCount: initialData.totalCount, requirements };
+        store.updatePoolSnapshot(currentPool, snapshot);
+        await db.saveSnapshot(snapshot);
+        log('InitialCollect', 'PASS', `"${currentPool}" 初始快照已保存`);
+      }
+
       if (idx !== -1) this.initialPoolIndex = idx;
     } else {
       log('InitialCollect', 'INFO', '当前页面不在任何目标池上，由倒计时轮询处理');
@@ -158,6 +177,7 @@ export class Monitor {
   }
 
   stop() {
+    log('Monitor', 'INFO', '监控已停止');
     this.countdown.stop();
     stopRecovery();
     this.initialized = false;
@@ -219,6 +239,19 @@ export class Monitor {
       }
 
       if (!apiData) return;
+
+      // 分页残留修复：上一轮翻页后页面保留了分页状态，点击菜单可能返回非第 1 页数据
+      if (apiData.toPage > 1) {
+        log('CheckPool', 'WARN', `"${poolName}" 收到第 ${apiData.toPage} 页数据，回退到第 1 页`);
+        const resetData = await this.resetPagination(poolName);
+        if (resetData) {
+          apiData = resetData;
+          log('CheckPool', 'PASS', `"${poolName}" 已回退到第 1 页`, formatApiData(apiData));
+        } else {
+          log('CheckPool', 'FAIL', `"${poolName}" 回退到第 1 页失败，跳过本轮`);
+          return;
+        }
+      }
 
       const pageSize = apiData.pageSize || 100;
       const rawPages = Math.ceil(apiData.totalCount / pageSize);
@@ -346,9 +379,69 @@ export class Monitor {
     this.poolStates.delete(poolIndex);
   }
 
+  // ── 分页回退：页面分页状态残留时回退到第 1 页 ──
+
+  private async resetPagination(poolName: string): Promise<ApiResponseData | null> {
+    // 优先查找分页列表中的"1"按钮（直接跳转第 1 页）
+    const pagItems = document.querySelectorAll('.next-pagination-item');
+    let targetBtn: HTMLElement | null = null;
+
+    for (const item of pagItems) {
+      const el = item as HTMLElement;
+      const text = el.textContent?.trim();
+      if (text === '1' && !el.classList.contains('next-next') && !el.classList.contains('next-prev')) {
+        targetBtn = el;
+        break;
+      }
+    }
+
+    // 回退：使用"上一页"按钮
+    if (!targetBtn) {
+      targetBtn = document.querySelector(CONFIG.selectors.prevPageBtn) as HTMLElement | null;
+    }
+
+    if (!targetBtn) {
+      log('CheckPool', 'WARN', `"${poolName}" 未找到分页回退按钮`);
+      return null;
+    }
+
+    this.apiBridge.invalidateFreshness();
+    const clickTime = Date.now();
+    simulateClick(targetBtn);
+    await sleep(CONFIG.clickRenderDelay);
+    await this.waiter.waitForContentReady();
+
+    try {
+      const data = await this.apiBridge.waitForFreshResponse(clickTime, 10_000);
+      if (data.toPage !== 1) {
+        log('CheckPool', 'WARN', `"${poolName}" 回退后仍在第 ${data.toPage} 页`);
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
   // ── 最终处理：快照比对 → 持久化 → 通知 ──
 
   private async finalizePool(poolName: string, totalCount: number, requirements: string[]) {
+    // 去重：翻页期间数据变动可能导致同一需求出现在多页中
+    const uniqueReqs = [...new Set(requirements)];
+    if (uniqueReqs.length < requirements.length) {
+      log('CheckPool', 'WARN', `"${poolName}" 翻页数据重复`,
+        `collected=${requirements.length} unique=${uniqueReqs.length} duplicates=${requirements.length - uniqueReqs.length}`);
+      requirements = uniqueReqs;
+    }
+
+    // 翻页数据完整性校验：collected !== totalCount 说明翻页期间后端数据发生了变化
+    // 此时快照不可靠，跳过变化检测，保留上一轮的完整快照，等下一轮重新收集
+    if (requirements.length !== totalCount) {
+      log('CheckPool', 'WARN', `"${poolName}" 翻页数据不完整，跳过变化检测`,
+        `collected=${requirements.length} totalCount=${totalCount}，保留上一轮快照`);
+      store.setState({ status: `${poolName} 数据不一致，等待下轮`, statusType: 'warning' });
+      return;
+    }
+
     const newSnapshot: PoolSnapshot = { poolName, totalCount, requirements };
     const oldSnapshot = store.getState().poolSnapshots[poolName] ?? null;
     const change = detectChanges(oldSnapshot, newSnapshot);
@@ -389,7 +482,9 @@ export class Monitor {
       };
 
       const poolSummary = Object.entries(pools).map(([k, v]) => `${k}:${v}`).join(' ');
-      log('Round', 'PASS', `第 ${store.getState().currentRound} 轮完成`, poolSummary);
+      const mem = store.getState().memoryUsage;
+      const memInfo = mem ? ` | memory=${mem.usedMB}MB(${mem.percent}%)` : '';
+      log('Round', 'PASS', `第 ${store.getState().currentRound} 轮完成`, poolSummary + memInfo);
 
       store.addHistoryRecord(record);
       db.addHistory(record).catch(() => {});

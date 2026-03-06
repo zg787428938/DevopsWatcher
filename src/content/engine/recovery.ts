@@ -3,20 +3,39 @@
 
 import { CONFIG } from '../../config';
 import { store } from '../../store';
+import { log } from '../services/logger';
 import type { ApiBridge } from '../services/api-bridge';
 
 let recoveryInterval: number | null = null;
-let refreshScheduled = false; // 防止内存超限和 API 超时同时触发多次刷新
+let refreshScheduled = false;
 
-// 启动恢复监控：按 loadTimeoutCheckInterval（10秒）周期检测内存和 API 状态
+export function isContextValid(): boolean {
+  try {
+    return !!chrome.runtime?.id;
+  } catch {
+    return false;
+  }
+}
+
 export function startRecovery(apiBridge: ApiBridge): void {
   if (!CONFIG.loadTimeoutEnabled) return;
 
-  // 等首次收到 API 响应后才开始超时检测，避免启动阶段误判
   let firstResponseReceived = false;
 
   recoveryInterval = window.setInterval(() => {
-    if (refreshScheduled) return; // 已安排刷新，跳过后续检测
+    if (refreshScheduled) return;
+
+    // 扩展上下文失效检测（扩展被重新加载/更新后触发）
+    if (!isContextValid()) {
+      refreshScheduled = true;
+      log('Recovery', 'WARN', '扩展上下文已失效，即将刷新页面');
+      store.setState({
+        status: '扩展已更新，即将刷新...',
+        statusType: 'warning',
+      });
+      setTimeout(() => safeRefresh(), 1000);
+      return;
+    }
 
     checkMemory();
 
@@ -24,10 +43,10 @@ export function startRecovery(apiBridge: ApiBridge): void {
     if (lastResponse > 0) firstResponseReceived = true;
     if (!firstResponseReceived) return;
 
-    // API 超时判定：最后一次 API 响应距今超过 loadTimeoutThreshold（60秒）
     const elapsed = Date.now() - lastResponse;
     if (elapsed > CONFIG.loadTimeoutThreshold) {
       refreshScheduled = true;
+      log('Recovery', 'FAIL', 'API 超时，即将刷新页面', `elapsed=${Math.round(elapsed / 1000)}s threshold=${Math.round(CONFIG.loadTimeoutThreshold / 1000)}s`);
       store.setState({
         status: '页面加载超时，即将刷新...',
         statusType: 'error',
@@ -54,6 +73,7 @@ function checkMemory(): void {
   const usedMB = perf.memory.usedJSHeapSize / 1048576;
   if (usedMB > CONFIG.memoryLimitMB) {
     refreshScheduled = true;
+    log('Recovery', 'FAIL', '内存超限，即将刷新页面', `usedMB=${Math.round(usedMB)} limitMB=${CONFIG.memoryLimitMB}`);
     store.setState({
       status: `内存超限 (${Math.round(usedMB)}MB)，即将刷新...`,
       statusType: 'error',
@@ -63,14 +83,27 @@ function checkMemory(): void {
   }
 }
 
-// 安全刷新：确保刷新后的 URL 包含 ? 使插件能激活，兼容 hash 路由中 ? 在 # 之后的情况
+// 安全刷新：确保刷新后的 URL 包含 ? 使插件能激活
+// 使用 location.href 赋值而非 location.reload()，后者在 SPA + content script 中可能不可靠
 function safeRefresh(): void {
   const href = location.href;
-  if (!href.includes('?')) {
-    // hash 路由场景：在 hash 末尾追加 ?_dw=1 作为占位参数
-    location.href = href + (href.includes('#') ? '?_dw=1' : '?_dw=1');
+  // 检查是否有真正的查询参数（? 在 # 之前才算）
+  const hashIdx = href.indexOf('#');
+  const hasRealQuery = hashIdx === -1
+    ? href.includes('?')
+    : href.substring(0, hashIdx).includes('?');
+
+  if (hasRealQuery) {
+    // 已有查询参数，追加/替换时间戳参数强制刷新
+    const sep = href.includes('?') ? '&' : '?';
+    window.location.href = href.replace(/[&?]_dw=\d+/, '') + sep + '_dw=' + Date.now();
   } else {
-    location.reload();
+    // 无查询参数，在 hash 之前插入 ?_dw=timestamp
+    if (hashIdx !== -1) {
+      window.location.href = href.substring(0, hashIdx) + '?_dw=' + Date.now() + href.substring(hashIdx);
+    } else {
+      window.location.href = href + '?_dw=' + Date.now();
+    }
   }
 }
 

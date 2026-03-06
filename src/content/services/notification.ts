@@ -2,13 +2,15 @@
 // 通知格式严格遵循 PRD 第 3.3 节的标题和正文规范
 
 import { CONFIG } from '../../config';
+import { isContextValid } from '../engine/recovery';
+import { log } from './logger';
 import type { PoolChange } from '../../types';
 
-// 根据需求变化构建通知标题和正文，通过 chrome.runtime.sendMessage 委托 background 创建桌面通知
 export async function sendNotification(change: PoolChange): Promise<void> {
+  if (!isContextValid()) return;
+
   const { poolName, oldCount, newCount, added, removed } = change;
 
-  // 标题格式：📢 【需求池名称】 [+新增数 -移除数]，仅当有具体名称变化时显示 [+N -M]
   let title = `📢 【${poolName}】`;
   if (added.length > 0 || removed.length > 0) {
     title += ` [+${added.length} -${removed.length}]`;
@@ -16,7 +18,6 @@ export async function sendNotification(change: PoolChange): Promise<void> {
 
   const lines: string[] = [];
 
-  // 数量变化行：使用 📈/📉 指示增减方向
   const diff = newCount - oldCount;
   if (diff > 0) {
     lines.push(`📈 ${oldCount}→${newCount} (+${diff})`);
@@ -24,7 +25,6 @@ export async function sendNotification(change: PoolChange): Promise<void> {
     lines.push(`📉 ${oldCount}→${newCount} (${diff})`);
   }
 
-  // 新增需求列表：超过 30 字自动截断并加省略号
   if (added.length > 0) {
     lines.push('➕ 新增:');
     for (const name of added) {
@@ -33,7 +33,6 @@ export async function sendNotification(change: PoolChange): Promise<void> {
     }
   }
 
-  // 移除需求列表
   if (removed.length > 0) {
     lines.push('➖ 移除:');
     for (const name of removed) {
@@ -52,16 +51,7 @@ export async function sendNotification(change: PoolChange): Promise<void> {
       duration: CONFIG.notificationDuration,
     });
   } catch (err) {
-    console.error('[DevOps Watcher] Failed to send notification:', err);
-    handleContextInvalidated(err);
-  }
-}
-
-// 检测扩展上下文是否已失效（扩展被重新加载/更新），失效时刷新页面获取新的 content script
-export function handleContextInvalidated(err: unknown): void {
-  if (err instanceof Error && err.message.includes('Extension context invalidated')) {
-    console.warn('[DevOps Watcher] Extension context invalidated, reloading page...');
-    setTimeout(() => location.reload(), 1000);
+    log('Notification', 'WARN', '通知发送失败', (err as Error).message);
   }
 }
 

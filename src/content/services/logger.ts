@@ -37,6 +37,10 @@ export function getLogCount(): number {
   return logs.length;
 }
 
+export function getLogs(): readonly LogEntry[] {
+  return logs;
+}
+
 export function downloadLog() {
   if (logs.length === 0) {
     log('Download', 'INFO', '当前无日志');

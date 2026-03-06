@@ -23,7 +23,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     sendResponse({ success: true });
   }
-  // 返回 true 保持消息通道开放，支持异步 sendResponse
+  if (message.type === 'CLOSE_TAB') {
+    if (_sender.tab?.id) {
+      chrome.tabs.remove(_sender.tab.id);
+    }
+    sendResponse({ success: true });
+  }
+
   return true;
 });
 

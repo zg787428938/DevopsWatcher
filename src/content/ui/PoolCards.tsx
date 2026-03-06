@@ -19,9 +19,12 @@ export const PoolCards: React.FC<Props> = ({ snapshots }) => {
         const color = getTargetColor(idx);
         return (
           <div key={name} className="dw-pool-card">
-            <span className="dw-pool-card-name" title={name}>
-              {name}
-            </span>
+            <div className="dw-pool-card-left">
+              <span className="dw-pool-card-dot" style={{ background: color }} />
+              <span className="dw-pool-card-name" title={name}>
+                {name}
+              </span>
+            </div>
             <span className="dw-pool-card-count" style={{ color }}>
               {snap?.totalCount ?? '-'}
             </span>

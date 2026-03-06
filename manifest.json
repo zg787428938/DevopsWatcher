@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
   "name": "DevOps Watcher",
-  "version": "1.0.0",
+  "version": "1.0.9",
   "description": "Monitor Alibaba Cloud DevOps requirement pools in real-time",
-  "permissions": ["notifications", "tabs"],
+  "permissions": [
+    "notifications",
+    "tabs"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -18,15 +21,23 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://devops.aliyun.com/projex/project/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://devops.aliyun.com/projex/project/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inject.js"],
-      "matches": ["https://devops.aliyun.com/*"]
+      "resources": [
+        "inject.js"
+      ],
+      "matches": [
+        "https://devops.aliyun.com/*"
+      ]
     }
   ],
   "icons": {

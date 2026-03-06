@@ -14,6 +14,7 @@ import { TestRunner } from './engine/test-runner';
 import { downloadLog } from './services/logger';
 import { App } from './ui/App';
 import { STYLES } from './ui/styles';
+import tailwindCSS from './ui/globals.css?inline';
 
 const MONITORING_STATE_KEY = 'devops-watcher-monitoring';
 
@@ -83,7 +84,7 @@ function mountUI() {
   const shadow = host.attachShadow({ mode: 'open' });
 
   const style = document.createElement('style');
-  style.textContent = STYLES;
+  style.textContent = tailwindCSS + '\n' + STYLES;
   shadow.appendChild(style);
 
   const mountPoint = document.createElement('div');
@@ -94,37 +95,13 @@ function mountUI() {
 }
 
 async function main() {
-  // Phase 1：注入 API 劫持并启动桥接
   injectApiHook();
   const apiBridge = new ApiBridge();
   apiBridge.start();
 
-  await waitForBody();
-
-  const canActivate = shouldActivate();
-  const testMode = isTestMode();
-  const savedState = loadMonitoringState();
-
-  // 自动启动条件：URL 可激活且未被用户明确关闭
-  const shouldAutoStart = canActivate && savedState !== false && !testMode;
-
   let monitor: Monitor | null = null;
 
-  if (testMode) {
-    mountUI();
-    await db.init();
-    const runner = new TestRunner(apiBridge);
-    runner.run();
-  } else if (shouldAutoStart) {
-    mountUI();
-    monitor = new Monitor(apiBridge);
-    monitor.start();
-    saveMonitoringState(true);
-  } else {
-    store.setState({ isMonitoring: false, status: '监控未启动', statusType: 'normal' });
-  }
-
-  // 始终注册消息监听，确保 Popup 在任何状态下都能通信
+  // 在异步操作前注册消息监听，确保 Popup 始终能通信（包括页面加载期间）
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'QUERY_STATE') {
       const s = store.getState();
@@ -164,6 +141,28 @@ async function main() {
 
     return false;
   });
+
+  await waitForBody();
+
+  const canActivate = shouldActivate();
+  const testMode = isTestMode();
+  const savedState = loadMonitoringState();
+
+  const shouldAutoStart = canActivate && savedState !== false && !testMode;
+
+  if (testMode) {
+    mountUI();
+    await db.init();
+    const runner = new TestRunner(apiBridge);
+    runner.run();
+  } else if (shouldAutoStart) {
+    mountUI();
+    monitor = new Monitor(apiBridge);
+    monitor.start();
+    saveMonitoringState(true);
+  } else {
+    store.setState({ isMonitoring: false, status: '监控未启动', statusType: 'normal' });
+  }
 }
 
 main();
