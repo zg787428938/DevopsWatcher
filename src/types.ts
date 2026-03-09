@@ -49,6 +49,17 @@ export interface HistoryRecord {
   pools: Record<string, number>; // 各需求池名称 -> 需求数量的映射
 }
 
+// 日志条目：记录监控和测试过程中的关键事件，持久化到 IndexedDB
+export interface LogEntry {
+  id?: number;
+  time: string;
+  ts: number;
+  phase: string;
+  status: 'PASS' | 'FAIL' | 'INFO' | 'WARN';
+  message: string;
+  detail?: string;
+}
+
 // 面板/悬浮球在视口中的绝对像素位置
 export interface Position {
   x: number;

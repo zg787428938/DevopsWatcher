@@ -111,6 +111,7 @@ async function main() {
 
     if (message.type === 'SET_MONITORING') {
       if (message.enabled) {
+        store.setState({ isMonitoring: true });
         mountUI();
         if (!monitor) {
           monitor = new Monitor(apiBridge);

@@ -1,35 +1,71 @@
 // 统一日志服务：正式监控和测试模式共享同一个日志存储
-// 支持随时通过 Popup "下载日志"按钮导出已收集的日志
+// 监控模式下日志持久化到 IndexedDB，刷新页面后自动恢复
+// 测试模式下清空日志重新开始，测试完成后自动下载
 // 日志条目上限 MAX_ENTRIES，超出时丢弃最早的记录
 
-import type { PoolChange, ApiResponseData } from '../../types';
+import type { PoolChange, ApiResponseData, LogEntry } from '../../types';
+import { db } from './db';
 
-export interface LogEntry {
-  time: string;
-  phase: string;
-  status: 'PASS' | 'FAIL' | 'INFO' | 'WARN';
-  message: string;
-  detail?: string;
-}
+export type { LogEntry };
 
 const MAX_ENTRIES = 2000;
+const TRIM_INTERVAL = 100;
 
 let logs: LogEntry[] = [];
 let sessionStart = Date.now();
 let mode: 'monitor' | 'test' = 'monitor';
+let dbReady = false;
+let writesSinceTrim = 0;
+
+export async function initLogger(): Promise<void> {
+  try {
+    const savedLogs = await db.getAllLogs();
+    if (savedLogs.length > 0) {
+      const validLogs = savedLogs.filter(entry => entry.ts > 0);
+      // 一次性迁移：清理 DB 中没有 ts 字段的旧条目
+      if (validLogs.length < savedLogs.length) {
+        await db.clearLogs();
+        for (const entry of validLogs) {
+          await db.addLog(entry);
+        }
+      }
+      logs = validLogs;
+      if (logs.length > MAX_ENTRIES) {
+        logs = logs.slice(logs.length - MAX_ENTRIES);
+      }
+    }
+    dbReady = true;
+    mode = 'monitor';
+  } catch {
+    dbReady = false;
+  }
+}
 
 export function resetLog(logMode: 'monitor' | 'test' = 'monitor') {
   logs = [];
   sessionStart = Date.now();
   mode = logMode;
+  writesSinceTrim = 0;
+  if (dbReady) {
+    db.clearLogs().catch(() => {});
+  }
 }
 
 export function log(phase: string, status: LogEntry['status'], message: string, detail?: string) {
   const now = new Date();
   const time = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
-  logs.push({ time, phase, status, message, detail });
+  const entry: LogEntry = { time, ts: now.getTime(), phase, status, message, detail };
+  logs.push(entry);
   if (logs.length > MAX_ENTRIES) {
     logs = logs.slice(logs.length - MAX_ENTRIES);
+  }
+  if (dbReady) {
+    db.addLog(entry).catch(() => {});
+    writesSinceTrim++;
+    if (writesSinceTrim >= TRIM_INTERVAL) {
+      writesSinceTrim = 0;
+      db.trimLogs(MAX_ENTRIES).catch(() => {});
+    }
   }
 }
 
@@ -84,7 +120,7 @@ function triggerDownload() {
     `  Mode: ${mode}`,
     `  Date: ${now.toLocaleString('zh-CN')}`,
     `  URL: ${location.href}`,
-    `  Duration: ${((Date.now() - sessionStart) / 1000).toFixed(1)}s`,
+    `  Duration: ${((Date.now() - (logs.find(l => l.ts > 0)?.ts ?? sessionStart)) / 1000).toFixed(1)}s`,
     `  Entries: ${logs.length}` + (logs.length >= MAX_ENTRIES ? ` (capped at ${MAX_ENTRIES})` : ''),
     '═'.repeat(60),
     '',

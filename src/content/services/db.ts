@@ -2,10 +2,10 @@
 // 数据库版本 2：新增 changes store 用于需求变化持久化
 
 import { CONFIG } from '../../config';
-import type { HistoryRecord, PoolSnapshot, PoolChange, Position } from '../../types';
+import type { HistoryRecord, PoolSnapshot, PoolChange, Position, LogEntry } from '../../types';
 
 const DB_NAME = 'devops-watcher';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let database: IDBDatabase | null = null;
 
@@ -33,6 +33,10 @@ function open(): Promise<IDBDatabase> {
         const changesStore = db.createObjectStore('changes', { keyPath: 'id', autoIncrement: true });
         changesStore.createIndex('timestamp', 'timestamp');
         changesStore.createIndex('poolName', 'poolName');
+      }
+      // v3: 日志持久化，自增 id 保持插入顺序
+      if (!db.objectStoreNames.contains('logs')) {
+        db.createObjectStore('logs', { keyPath: 'id', autoIncrement: true });
       }
     };
 
@@ -206,6 +210,44 @@ export const db = {
       };
       cursorReq.onerror = () => reject(cursorReq.error);
     });
+  },
+
+  // ── 日志 CRUD ──
+
+  async addLog(entry: LogEntry): Promise<void> {
+    const copy = { ...entry };
+    delete copy.id;
+    tx('logs', 'readwrite').add(copy);
+  },
+
+  async getAllLogs(): Promise<LogEntry[]> {
+    return request(tx('logs').getAll());
+  },
+
+  async getLogsCount(): Promise<number> {
+    return request(tx('logs').count());
+  },
+
+  async trimLogs(maxEntries: number): Promise<void> {
+    const count = await this.getLogsCount();
+    if (count <= maxEntries) return;
+    const trimCount = count - maxEntries;
+    const st = tx('logs', 'readwrite');
+    let deleted = 0;
+    const cursorReq = st.openCursor();
+    await new Promise<void>((resolve) => {
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor || deleted >= trimCount) { resolve(); return; }
+        cursor.delete();
+        deleted++;
+        cursor.continue();
+      };
+    });
+  },
+
+  async clearLogs(): Promise<void> {
+    tx('logs', 'readwrite').clear();
   },
 
   // 获取面板位置（collapsed 或 expanded），返回 undefined 表示使用默认位置

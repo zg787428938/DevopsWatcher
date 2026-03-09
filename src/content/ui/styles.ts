@@ -144,6 +144,7 @@ export const STYLES = `
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 12px 14px 16px;
   display: flex;
   flex-direction: column;
@@ -278,6 +279,7 @@ export const STYLES = `
 .dw-section-body {
   padding: 10px 14px 14px;
   border-top: 1px solid #f1f5f9;
+  scrollbar-gutter: stable;
 }
 
 /* ── 趋势图表 ── */

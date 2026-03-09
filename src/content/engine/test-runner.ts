@@ -8,7 +8,7 @@ import { ApiBridge } from '../services/api-bridge';
 import { db } from '../services/db';
 import { sendNotification, playBeep } from '../services/notification';
 import { log, resetLog, downloadLog, getLogs, formatApiData, formatChange } from '../services/logger';
-import { isContextValid } from './recovery';
+import { isContextValid, isRefreshPending } from './recovery';
 import { Scanner } from './scanner';
 import { Waiter } from './waiter';
 import { detectChanges } from './detector';
@@ -770,6 +770,22 @@ export class TestRunner {
       log('UI', overflowY === 'auto' || overflowY === 'scroll' ? 'PASS' : 'FAIL', '滚动容器 overflow-y',
         `overflowY="${overflowY}" scrollHeight=${contentEl.scrollHeight} clientHeight=${contentEl.clientHeight} needsScroll=${scrollable}`);
 
+      // 14. scrollbar-gutter 验证（防止滚动条出现/消失导致宽度跳动）
+      const contentGutter = cs.getPropertyValue('scrollbar-gutter') || (cs as any).scrollbarGutter || '';
+      log('UI', contentGutter.includes('stable') ? 'PASS' : 'FAIL', '滚动容器 scrollbar-gutter',
+        `expected="stable" actual="${contentGutter}"（防止滚动条显隐导致内容宽度跳动）`);
+
+      const sectionBodies = shadow.querySelectorAll('.dw-section-body');
+      sectionBodies.forEach((body, i) => {
+        const bodyCS = getComputedStyle(body);
+        const bodyOverflow = bodyCS.overflowY;
+        if (bodyOverflow === 'auto' || bodyOverflow === 'scroll') {
+          const bodyGutter = bodyCS.getPropertyValue('scrollbar-gutter') || (bodyCS as any).scrollbarGutter || '';
+          log('UI', bodyGutter.includes('stable') ? 'PASS' : 'FAIL', `section-body[${i}] scrollbar-gutter`,
+            `expected="stable" actual="${bodyGutter}" overflowY="${bodyOverflow}"`);
+        }
+      });
+
       // 展开所有折叠区域后重新检测
       store.setState({ chartCollapsed: false, changesCollapsed: false, historyCollapsed: false });
       await sleep(200);
@@ -1067,6 +1083,18 @@ export class TestRunner {
           }
         }
       }
+      // ── 日志持久化验证（DB v3）──
+      const logsCount = await db.getLogsCount();
+      log('IndexedDB', logsCount > 0 ? 'PASS' : 'WARN', '日志持久化',
+        `logs store 记录数=${logsCount}（刷新后应保留历史日志）`);
+
+      const allSavedLogs = await db.getAllLogs();
+      const hasTs = allSavedLogs.length > 0 && typeof allSavedLogs[0].ts === 'number' && allSavedLogs[0].ts > 0;
+      log('IndexedDB', hasTs ? 'PASS' : (allSavedLogs.length === 0 ? 'WARN' : 'FAIL'), '日志条目 ts 字段',
+        allSavedLogs.length > 0
+          ? `firstEntry.ts=${allSavedLogs[0].ts}（用于 Duration 精确计算）`
+          : '无日志条目');
+
     } catch (err) {
       log('IndexedDB', 'FAIL', 'IndexedDB 访问失败', (err as Error).message);
     }
@@ -1198,6 +1226,22 @@ export class TestRunner {
 
     log('RuntimeHealth', 'INFO', 'Store 状态摘要',
       `isMonitoring=${state.isMonitoring} currentRound=${state.currentRound} changes=${state.changes.length} historyTotal=${state.historyTotal}`);
+
+    // ── 7. Recovery 延迟刷新机制验证 ──
+    const refreshPending = isRefreshPending();
+    log('RuntimeHealth', !refreshPending ? 'PASS' : 'WARN', 'Recovery 延迟刷新状态',
+      `isRefreshPending=${refreshPending}（true 表示将在当前轮次结束后刷新，而非立即刷新）`);
+
+    // ── 8. 日志条目 ts 字段验证 ──
+    const logEntries = getLogs();
+    if (logEntries.length > 0) {
+      const first = logEntries[0];
+      const last = logEntries[logEntries.length - 1];
+      const firstHasTs = typeof first.ts === 'number' && first.ts > 0;
+      const lastHasTs = typeof last.ts === 'number' && last.ts > 0;
+      log('RuntimeHealth', firstHasTs && lastHasTs ? 'PASS' : 'FAIL', '日志 ts 字段完整性',
+        `first.ts=${first.ts} last.ts=${last.ts} span=${firstHasTs && lastHasTs ? ((last.ts - first.ts) / 1000).toFixed(1) + 's' : 'N/A'}`);
+    }
   }
 
   // ==================== Summary ====================

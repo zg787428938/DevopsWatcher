@@ -9,11 +9,11 @@ import { CountdownService } from '../services/countdown';
 import { sendNotification, playBeep } from '../services/notification';
 import { db } from '../services/db';
 import { startMemoryMonitor } from '../services/memory';
-import { log, resetLog, formatApiData, formatChange } from '../services/logger';
+import { log, initLogger, formatApiData, formatChange } from '../services/logger';
 import { Scanner } from './scanner';
 import { Waiter } from './waiter';
 import { detectChanges } from './detector';
-import { startRecovery, stopRecovery } from './recovery';
+import { startRecovery, stopRecovery, isRefreshPending, safeRefresh } from './recovery';
 import { simulateClick } from './click';
 import type { PoolSnapshot, HistoryRecord, ApiResponseData } from '../../types';
 
@@ -50,13 +50,13 @@ export class Monitor {
     if (this.initialized) return;
     this.initialized = true;
 
-    resetLog('monitor');
-    log('Monitor', 'INFO', '监控启动', `URL=${location.href}`);
-    log('Monitor', 'INFO', '环境', `targets=${CONFIG.targets.join(',')} interval=${CONFIG.minInterval}-${CONFIG.maxInterval}s`);
-
-    store.setState({ status: '正在初始化...', statusType: 'normal' });
+    store.setState({ isMonitoring: true, status: '正在初始化...', statusType: 'normal' });
 
     await db.init();
+    await initLogger();
+
+    log('Monitor', 'INFO', '监控启动', `URL=${location.href}`);
+    log('Monitor', 'INFO', '环境', `targets=${CONFIG.targets.join(',')} interval=${CONFIG.minInterval}-${CONFIG.maxInterval}s`);
 
     const [history, snapshots, changes, collapsedPos, expandedPos] = await Promise.all([
       db.getHistory(0, CONFIG.historyPageSize),
@@ -488,6 +488,12 @@ export class Monitor {
 
       store.addHistoryRecord(record);
       db.addHistory(record).catch(() => {});
+    }
+
+    if (isRefreshPending()) {
+      log('Recovery', 'INFO', '当前轮次已完成，执行延迟刷新');
+      safeRefresh();
+      return;
     }
 
     this.startNextRound();

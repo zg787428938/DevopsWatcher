@@ -53,7 +53,7 @@ npx tsc --noEmit                   # 类型检查
 ```
 src/
 ├── config.ts              # 全局配置参数（间隔、选择器、阈值等）+ 工具函数
-├── types.ts               # 所有 TypeScript 接口定义
+├── types.ts               # 所有 TypeScript 接口定义（含 LogEntry）
 ├── store.ts               # 发布-订阅状态管理（驱动 React UI）
 ├── lib/
 │   └── utils.ts           # cn() 工具函数（clsx + tailwind-merge）
@@ -70,8 +70,8 @@ src/
     ├── services/
     │   ├── api-bridge.ts   # API 数据桥接（缓存 + 异步等待 + 新鲜度隔离）
     │   ├── countdown.ts    # 倒计时调度（wall-clock + 均匀分布）
-    │   ├── db.ts           # IndexedDB 封装（快照/历史/变化/位置 四类数据，DB v2）
-    │   ├── logger.ts       # 统一日志服务（正式/测试模式共享，上限 2000 条，getLogs() 供 Summary 使用）
+    │   ├── db.ts           # IndexedDB 封装（快照/历史/变化/位置/日志 五类数据，DB v3）
+    │   ├── logger.ts       # 统一日志服务（IndexedDB 持久化，正式/测试模式共享，上限 2000 条）
     │   ├── memory.ts       # JS 堆内存监控
     │   └── notification.ts # 桌面通知 + Web Audio 蜂鸣音（上下文有效性预检）
     ├── engine/
@@ -81,7 +81,7 @@ src/
     │   ├── detector.ts     # 快照比对（新增/移除检测）
     │   ├── pagination.ts   # 模拟翻页收集全量数据
     │   ├── click.ts        # 模拟真实用户点击（Pointer+Mouse 事件序列）
-    │   ├── recovery.ts     # 异常恢复（内存超限/API 超时/上下文失效自动刷新）
+    │   ├── recovery.ts     # 异常恢复（内存超限/API 超时延迟至轮次结束后刷新，上下文失效立即刷新）
     │   └── test-runner.ts  # 诊断测试套件（10 Phase + Summary）
     └── ui/
         ├── globals.css     # Tailwind CSS 指令 + shadcn CSS 变量（:host 作用域）
@@ -95,7 +95,7 @@ src/
         ├── HistorySection.tsx # 历史记录（无限滚动 + 差值显示）
         ├── DragWrapper.tsx # 拖拽容器（中心锚点边界检测）
         ├── hooks.ts        # useMonitorState hook
-        └── styles.ts       # Shadow DOM 内联 CSS（浅色主题）
+        └── styles.ts       # Shadow DOM 内联 CSS（浅色主题，scrollbar-gutter: stable）
 ```
 
 ---
@@ -110,6 +110,7 @@ src/
   → ApiBridge 开始监听
   → 等待 body 就绪
   → 挂载 Shadow DOM + React
+  → db.init() + initLogger()：初始化 IndexedDB，加载持久化日志（过滤无 ts 的旧条目）
   → initialCollect()：
       读取当前页面的目标池数据（无点击）
       记录当前池索引，后续首轮调度跳过该池避免重复
@@ -119,7 +120,9 @@ src/
       → 操作[i] 在 T*(i+1)/(totalOps+1) 秒偏移触发（首尾留缓冲）
       → checkPool: simulateClick → waitForContentReady → waitForFreshResponse → finalizePool
       → finalizePool: 去重 → 数据完整性校验 → 快照比对 → 通知
-      → 所有池检完 → onRoundComplete → 写入历史 + 变化 → 开始下一轮
+      → 所有池检完 → onRoundComplete → 写入历史 + 变化
+        → 检查 isRefreshPending()：若 recovery 已标记待刷新则 safeRefresh()
+        → 否则开始下一轮
 ```
 
 ### 模拟点击（click.ts）
@@ -180,7 +183,7 @@ offset[i] = T * (i + 1) / (totalOps + 1)
 
 ## 数据持久化（db.ts）
 
-IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes` store）。
+IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`，v3 新增 `logs`）。
 
 | Object Store | 主键 | 索引 | 说明 |
 |---|---|---|---|
@@ -188,8 +191,9 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 | `history` | `id` (autoIncrement) | `timestamp` | 每轮检测的数量记录，上限 `maxHistoryRecords` |
 | `changes` | `id` (autoIncrement) | `timestamp`, `poolName` | 需求变化详情（新增/移除），上限 `maxChangesRecords` |
 | `positions` | `type` | — | UI 位置坐标（`collapsed` / `expanded`） |
+| `logs` | `id` (autoIncrement) | — | 日志条目持久化，刷新后恢复，上限 `MAX_ENTRIES` |
 
-`onupgradeneeded` 中按 store 是否存在逐一创建，支持从 v1 平滑升级到 v2。
+`onupgradeneeded` 中按 store 是否存在逐一创建，支持从 v1 平滑升级到 v3。
 
 ---
 
@@ -224,13 +228,16 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 
 ## 日志系统（logger.ts）
 
-正式监控和测试模式共享同一个 `Logger` 实例（单例）。每条日志包含 `time`、`phase`、`status`（PASS/FAIL/INFO/WARN）、`message`、`detail`。
+正式监控和测试模式共享同一个 `Logger` 实例（单例）。每条日志包含 `time`、`ts`（毫秒时间戳）、`phase`、`status`（PASS/FAIL/INFO/WARN）、`message`、`detail`。
 
-- 上限 `MAX_ENTRIES = 2000`，超出时丢弃最早记录
+- **IndexedDB 持久化**：每条日志写入 `logs` store，页面刷新后通过 `initLogger()` 从 DB 恢复
+- `initLogger()` 加载时过滤掉没有 `ts` 字段的旧条目（一次性迁移），并将 DB 同步清理
+- 上限 `MAX_ENTRIES = 2000`，超出时丢弃最早记录（内存 + DB 同步裁剪）
 - 正式模式下记录关键事件（池切换、变化检测、翻页、异常恢复、内存超限、上下文失效等）
 - 测试模式下记录完整诊断信息
 - `getLogs()` 接口供 TestRunner 在运行时读取日志生成结构化 Summary
 - 通过 Popup「下载日志」按钮随时导出为 `.log` 文本文件
+- **Duration 精确计算**：导出日志时从第一条有效日志的 `ts` 字段计算持续时间，不受页面刷新重置影响
 
 ---
 
@@ -247,11 +254,11 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v2**（v2 新增 `changes`
 | 3 | Scanner | 侧边栏菜单扫描 |
 | 4 | InitialCollect | 当前页面数据提取 + 多页感知（非首页时跳过快照保存避免误报） |
 | 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 |
-| 6 | UI | 悬浮球/面板/卡片点色/变化区块结构/数量差值/文字可选择性 |
+| 6 | UI | 悬浮球/面板/卡片点色/变化区块结构/数量差值/文字可选择性/scrollbar-gutter 稳定性 |
 | 7 | Notification | 上下文有效性预检 + 桌面通知 + 蜂鸣音 + 权限状态 |
-| 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性 |
+| 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性/日志持久化(`logs` store 记录数 + `ts` 字段完整性) |
 | 9 | Memory | JS 堆内存 + 80% 阈值预警 |
-| 10 | RuntimeHealth | 扩展上下文/API Bridge 一致性/Recovery 计算/DOM 选择器/分页状态/Store 状态 |
+| 10 | RuntimeHealth | 扩展上下文/API Bridge 一致性/Recovery 计算/DOM 选择器/分页状态/Store 状态/延迟刷新状态(`isRefreshPending`)/日志 `ts` 字段完整性 |
 | — | Summary | 按 Phase 汇总 PASS/FAIL/WARN 计数，列出所有 FAIL 和 WARN 详情 |
 
 测试完成后自动下载 `.log` 日志文件，然后通过 Background 关闭测试标签页。测试与正式监控互斥。
@@ -325,6 +332,9 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 ### 为什么测试完成后通过 Background 关闭标签页？
 浏览器安全策略限制 `window.close()` 只能关闭由 `window.open()` 打开的窗口。测试标签页由 `chrome.tabs.create()` 创建，必须通过 `chrome.tabs.remove()` 关闭，而该 API 只在 Background Service Worker 中可用。因此 content script 发送 `CLOSE_TAB` 消息给 Background 完成关闭。
 
+### 为什么面板使用 scrollbar-gutter: stable？
+面板内容区（`.dw-content`）和折叠区域（`.dw-section-body`）使用 `overflow-y: auto`，滚动条仅在内容溢出时出现。传统 overlay scrollbar 出现/消失会导致内容区宽度变化，引起卡片网格、图表等元素重新布局产生视觉跳动。`scrollbar-gutter: stable` 始终为滚动条预留空间，无论是否溢出，消除了宽度跳变。
+
 ### 拖拽边界检测
 以元素中心为锚点：中心点不超出视口即可，元素可部分露出边缘。公式：`x ∈ [-width/2, vw - width/2]`。展开和收起状态分别维护独立位置坐标，持久化到 IndexedDB。
 
@@ -365,7 +375,10 @@ Content Script 未初始化完成时 `chrome.tabs.sendMessage` 会抛异常。Po
 `waitForContentReady()` 始终 resolve（不会 reject）。之后 `apiBridge.waitForFreshResponse(clickTime, 15s)` 等待 API 数据，超时进入重试循环（最多 `apiWaitMaxRetries=3` 次，每次重新点击菜单项并等待 `apiWaitRetryInterval=5s`）。全部失败后该池本轮跳过，不中断后续池和后续轮次。
 
 **Q: recovery.ts 刷新后的状态恢复？**
-`safeRefresh()` 通过 `window.location.href` 赋值带时间戳参数（`_dw=Date.now()`）强制导航（非 `location.reload()`，避免 SPA 忽略刷新）。刷新后 content script 重新执行两阶段初始化。`monitor.start()` 从 IndexedDB 恢复快照、历史、变化、位置。`isMonitoring` 从 `localStorage` 恢复（用户手动关闭后刷新不会重新开启）。若 URL 含 `?` 且未被用户明确关闭，监控自动恢复。
+`safeRefresh()` 通过 `window.location.href` 赋值带时间戳参数（`_dw=Date.now()`）强制导航（非 `location.reload()`，避免 SPA 忽略刷新）。刷新后 content script 重新执行两阶段初始化。`monitor.start()` 从 IndexedDB 恢复快照、历史、变化、位置和日志。`isMonitoring` 从 `localStorage` 恢复（用户手动关闭后刷新不会重新开启）。若 URL 含 `?` 且未被用户明确关闭，监控自动恢复。
+
+**Q: recovery.ts 何时立即刷新，何时延迟？**
+内存超限和 API 超时仅设置 `refreshScheduled = true` 标记，不立即刷新。`monitor.ts` 的 `onRoundComplete()` 在每轮结束时检查 `isRefreshPending()`，若为 true 则执行 `safeRefresh()`。这确保当前轮次的所有检测操作完整执行完毕后再刷新，避免中途中断丢失数据。唯一的例外是扩展上下文失效（`chrome.runtime.id` 不可用），此时扩展已无法正常工作，必须立即刷新。
 
 ### 测试与调试
 
