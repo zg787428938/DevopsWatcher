@@ -3,9 +3,10 @@ export interface PoolConfig {
   name: string;
 }
 
-// 云效 API 返回的单条需求项，subject 为需求名称
+// 云效 API 返回的单条需求项
 export interface RequirementItem {
   subject: string;
+  identifier: string; // 工作项唯一标识（用于获取详情）
 }
 
 // 从云效 API 响应中提取的核心数据结构，由 inject.ts 拦截并通过 postMessage 传递给 content script
@@ -28,6 +29,7 @@ export interface PoolSnapshot {
   poolName: string; // 需求池名称，作为 IndexedDB 主键
   totalCount: number; // API 返回的需求总数
   requirements: string[]; // 所有需求名称列表（合并全部分页后），用于精确比对
+  items?: RequirementItem[]; // 含 identifier 的完整需求项列表，用于详情查询
 }
 
 // 需求变化记录：两次检测之间检测到的差异，持久化到 IndexedDB 并在 UI 展示
@@ -60,6 +62,72 @@ export interface LogEntry {
   detail?: string;
 }
 
+// 云效工作项字段选项（字段定义中的可选值）
+export interface WorkitemFieldOption {
+  identifier: string;
+  value: string;
+  displayValue: string;
+  position: number | null;
+  level: number | null;
+  disabled: boolean;
+}
+
+// 云效工作项字段定义（从 /field/{id} API 获取的字段元信息）
+export interface WorkitemFieldDef {
+  identifier: string;
+  name: string;
+  displayName: string;
+  type: string;       // NativeField | CustomField | SystemCustomField | Application
+  format: string;     // list | multiList | input
+  className: string;  // string | user | option | text | float | int | dateTime | ...
+  defaultValue: string | null;
+  options: WorkitemFieldOption[] | null;
+  isRequired: boolean | null;
+  isReadOnly: boolean;
+  position: number;
+}
+
+// 字段值列表中的单个值项
+export interface WorkitemFieldValueItem {
+  value: string;
+  valueEn: string | null;
+  displayValue: string;
+  identifier: string;
+  level: number | null;
+}
+
+// 云效工作项字段值（从 /field/value/{id} API 获取）
+export interface WorkitemFieldValue {
+  fieldIdentifier: string;
+  fieldFormat: string;
+  fieldClassName: string;
+  value: string;
+  valueList: WorkitemFieldValueItem[];
+  workitemIdentifier: string;
+}
+
+// 组合后的工作项字段（定义 + 值合并）
+export interface WorkitemField {
+  identifier: string;
+  name: string;
+  displayName: string;
+  type: string;
+  format: string;
+  className: string;
+  value: string;
+  displayValue: string;
+  valueList: WorkitemFieldValueItem[];
+  options: WorkitemFieldOption[] | null;
+}
+
+// 完整的工作项详情（字段定义 + 字段值合并后的结构）
+export interface WorkitemDetail {
+  workitemId: string;
+  fields: WorkitemField[];
+  fieldMap: Record<string, WorkitemField>;
+  timestamp: number;
+}
+
 // 面板/悬浮球在视口中的绝对像素位置
 export interface Position {
   x: number;
@@ -85,6 +153,7 @@ export interface MonitorState {
   chartCollapsed: boolean; // 趋势图表折叠区域是否收起
   changesCollapsed: boolean; // 需求变化折叠区域是否收起
   historyCollapsed: boolean; // 历史记录折叠区域是否收起
+  requirementsCollapsed: boolean; // 需求列表折叠区域是否收起
   currentRound: number; // 当前检测轮次编号，每轮递增
   isTesting: boolean; // 是否正在执行测试流程（与监控互斥）
 }
@@ -129,6 +198,22 @@ export interface ResetPositionMessage {
 export interface StateResponse {
   isMonitoring: boolean;
   isTesting: boolean;
+}
+
+// inject.ts → content script 的字段定义消息
+export interface FieldDefsInterceptMessage {
+  type: 'DEVOPS_WATCHER_FIELD_DEFS';
+  workitemId: string;
+  data: WorkitemFieldDef[];
+  url: string;
+}
+
+// inject.ts → content script 的字段值消息
+export interface FieldValuesInterceptMessage {
+  type: 'DEVOPS_WATCHER_FIELD_VALUES';
+  workitemId: string;
+  data: WorkitemFieldValue[];
+  url: string;
 }
 
 // content script → background 的消息联合类型

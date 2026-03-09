@@ -34,10 +34,14 @@ function cssInlinePlugin() {
 // 根据 NODE_ENV 决定是否压缩输出，production 时启用 minify
 const isProd = process.env.NODE_ENV === 'production';
 
-// 从 config.ts 中提取 apiPath，构建时注入 inject.ts 消除双重硬编码
+// 从 config.ts 中提取 API 路径，构建时注入 inject.ts 消除双重硬编码
 const configSource = readFileSync(resolve(__dirname, 'src/config.ts'), 'utf-8');
 const apiPathMatch = configSource.match(/apiPath:\s*'([^']+)'/);
 const API_PATH = apiPathMatch ? apiPathMatch[1] : '/projex/api/workitem/workitem/list';
+const fieldApiPathMatch = configSource.match(/fieldApiPath:\s*'([^']+)'/);
+const FIELD_API_PATH = fieldApiPathMatch ? fieldApiPathMatch[1] : '/projex/api/workitem/workitem/field/';
+const fieldValueApiPathMatch = configSource.match(/fieldValueApiPath:\s*'([^']+)'/);
+const FIELD_VALUE_API_PATH = fieldValueApiPathMatch ? fieldValueApiPathMatch[1] : '/projex/api/workitem/workitem/field/value/';
 
 async function buildExtension() {
   // 第一步：构建 content script，使用 React 插件，输出为 IIFE 格式的 content.js
@@ -89,6 +93,8 @@ async function buildExtension() {
     },
     define: {
       __INJECT_API_PATH__: JSON.stringify(API_PATH),
+      __INJECT_FIELD_API_PATH__: JSON.stringify(FIELD_API_PATH),
+      __INJECT_FIELD_VALUE_API_PATH__: JSON.stringify(FIELD_VALUE_API_PATH),
     },
   });
 

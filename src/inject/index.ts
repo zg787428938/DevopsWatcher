@@ -1,33 +1,62 @@
 // 此脚本通过 <script> 标签注入到页面上下文中运行（非 content script 隔离环境）
-// 目的：劫持页面原生的 fetch/XHR 请求，拦截云效需求列表 API 响应数据
+// 目的：劫持页面原生的 fetch/XHR 请求，拦截云效 API 响应数据
+// 拦截三类 API：需求列表、工作项字段定义、工作项字段值
 // 通过 window.postMessage 将提取的数据传递给 content script
-// API_PATH 由 Vite define 在构建时从 config.ts 注入，消除与 config.ts 的双重硬编码
+// API 路径由 Vite define 在构建时从 config.ts 注入
 
 declare const __INJECT_API_PATH__: string;
-const API_PATH = __INJECT_API_PATH__;
-const MESSAGE_TYPE = 'DEVOPS_WATCHER_API_RESPONSE';
+declare const __INJECT_FIELD_API_PATH__: string;
+declare const __INJECT_FIELD_VALUE_API_PATH__: string;
 
-// 判断请求 URL 是否为目标 API：路径必须精确匹配 API_PATH，排除子路径（如 /list/count）
-function shouldIntercept(url: string): boolean {
+const API_PATH = __INJECT_API_PATH__;
+const FIELD_API_PATH = __INJECT_FIELD_API_PATH__;
+const FIELD_VALUE_API_PATH = __INJECT_FIELD_VALUE_API_PATH__;
+
+const MSG_LIST = 'DEVOPS_WATCHER_API_RESPONSE';
+const MSG_FIELD_DEFS = 'DEVOPS_WATCHER_FIELD_DEFS';
+const MSG_FIELD_VALUES = 'DEVOPS_WATCHER_FIELD_VALUES';
+
+// 判断请求 URL 是否为需求列表 API：路径必须精确匹配 API_PATH，排除子路径（如 /list/count）
+function isListApi(path: string): boolean {
+  if (!path.includes(API_PATH)) return false;
+  const idx = path.indexOf(API_PATH);
+  const remaining = path.substring(idx + API_PATH.length);
+  return remaining === '' || remaining === '/';
+}
+
+// 判断是否为字段相关 API，返回类型和 workitemId；field/value 路径更具体需先检查
+function classifyFieldApi(path: string): { msgType: string; workitemId: string } | null {
+  if (path.includes(FIELD_VALUE_API_PATH)) {
+    const idx = path.indexOf(FIELD_VALUE_API_PATH);
+    const remaining = path.substring(idx + FIELD_VALUE_API_PATH.length).replace(/\/$/, '');
+    if (remaining && !remaining.includes('/')) {
+      return { msgType: MSG_FIELD_VALUES, workitemId: remaining };
+    }
+  } else if (path.includes(FIELD_API_PATH)) {
+    const idx = path.indexOf(FIELD_API_PATH);
+    const remaining = path.substring(idx + FIELD_API_PATH.length).replace(/\/$/, '');
+    if (remaining && !remaining.includes('/')) {
+      return { msgType: MSG_FIELD_DEFS, workitemId: remaining };
+    }
+  }
+  return null;
+}
+
+// 快速判断 URL 是否可能匹配任一拦截目标，避免对不相关请求解析 JSON
+function shouldInterceptAny(url: string): boolean {
   try {
     const path = new URL(url, location.origin).pathname;
-    if (!path.includes(API_PATH)) return false;
-    const idx = path.indexOf(API_PATH);
-    const remaining = path.substring(idx + API_PATH.length);
-    // 路径在 API_PATH 之后只允许为空或单个斜杠，不允许有子路径
-    return remaining === '' || remaining === '/';
+    return path.includes(API_PATH) || path.includes(FIELD_API_PATH);
   } catch {
     return false;
   }
 }
 
-// 从 API JSON 响应中提取核心数据，兼容多种嵌套结构（直接字段 / data 包装 / result 包装）
-function extractApiData(json: any) {
+// 从需求列表 API JSON 响应中提取核心数据，兼容多种嵌套结构
+function extractListData(json: any) {
   if (!json || typeof json !== 'object') return null;
-  // 云效 API 约定：code === 200 表示业务成功
   if (json.code !== 200 && json.code !== '200') return null;
 
-  // 依次尝试从 json 本身、json.data、json.result 中查找含有 totalCount + result[] 的对象
   const candidates = [json, json.data, json.result];
   for (const data of candidates) {
     if (
@@ -38,7 +67,10 @@ function extractApiData(json: any) {
     ) {
       return {
         totalCount: data.totalCount,
-        result: data.result.map((item: any) => ({ subject: String(item.subject ?? '') })),
+        result: data.result.map((item: any) => ({
+          subject: String(item.subject ?? ''),
+          identifier: String(item.identifier ?? ''),
+        })),
         toPage: data.toPage ?? 1,
         pageSize: data.pageSize ?? 100,
       };
@@ -47,9 +79,29 @@ function extractApiData(json: any) {
   return null;
 }
 
-// 通过 postMessage 将提取的数据发送给 content script（content script 通过 window message 监听接收）
-function postData(data: any, url: string) {
-  window.postMessage({ type: MESSAGE_TYPE, data, url }, '*');
+// 统一处理拦截到的 API 响应，根据 URL 分发到不同的消息类型
+function processResponse(reqUrl: string, json: any) {
+  try {
+    const path = new URL(reqUrl, location.origin).pathname;
+
+    if (isListApi(path)) {
+      const data = extractListData(json);
+      if (data) {
+        window.postMessage({ type: MSG_LIST, data, url: reqUrl }, '*');
+      }
+      return;
+    }
+
+    const fieldInfo = classifyFieldApi(path);
+    if (fieldInfo && json?.code === 200 && Array.isArray(json.result)) {
+      window.postMessage({
+        type: fieldInfo.msgType,
+        workitemId: fieldInfo.workitemId,
+        data: json.result,
+        url: reqUrl,
+      }, '*');
+    }
+  } catch {}
 }
 
 // ==================== Hook fetch ====================
@@ -57,7 +109,6 @@ const originalFetch = window.fetch;
 window.fetch = async function (...args: any[]) {
   const response = await originalFetch.apply(this, args as any);
   try {
-    // 从 fetch 参数中提取请求 URL，兼容 string / Request / URL 三种入参形式
     const reqUrl =
       typeof args[0] === 'string'
         ? args[0]
@@ -65,18 +116,11 @@ window.fetch = async function (...args: any[]) {
           ? args[0].url
           : String(args[0]);
 
-    if (shouldIntercept(reqUrl)) {
-      // clone() 避免消费原始 response body，页面代码仍可正常读取响应
+    if (shouldInterceptAny(reqUrl)) {
       const clone = response.clone();
-      clone
-        .json()
-        .then((json) => {
-          const data = extractApiData(json);
-          if (data) postData(data, reqUrl);
-        })
-        .catch(() => {}); // 非 JSON 响应静默忽略
+      clone.json().then((json) => processResponse(reqUrl, json)).catch(() => {});
     }
-  } catch {} // 提取失败不应影响页面正常请求流程
+  } catch {}
   return response;
 };
 
@@ -85,23 +129,47 @@ const XHRProto = XMLHttpRequest.prototype;
 const originalOpen = XHRProto.open;
 const originalSend = XHRProto.send;
 
-// open() 阶段记录请求 URL 到实例属性，供 send() 阶段判断是否拦截
 XHRProto.open = function (method: string, url: string | URL, ...rest: any[]) {
   (this as any).__dwUrl = typeof url === 'string' ? url : url.toString();
   return originalOpen.apply(this, [method, url, ...rest] as any);
 };
 
-// send() 阶段：若 URL 匹配则注册 load 事件监听，在响应完成后提取数据
 XHRProto.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
   const url: string = (this as any).__dwUrl;
-  if (url && shouldIntercept(url)) {
+  if (url && shouldInterceptAny(url)) {
     this.addEventListener('load', function () {
       try {
         const json = JSON.parse(this.responseText);
-        const data = extractApiData(json);
-        if (data) postData(data, url);
-      } catch {} // 解析失败静默忽略
+        processResponse(url, json);
+      } catch {}
     });
   }
   return originalSend.call(this, body);
 };
+
+// ==================== 主动获取工作项详情 ====================
+// content script 通过 postMessage 请求获取指定工作项的字段定义和字段值
+// 使用 originalFetch 发起同源 GET 请求（浏览器自动携带 cookie），
+// 响应通过 processResponse 走已有的拦截管道分发给 content script
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return;
+  if (event.data?.type === 'DEVOPS_WATCHER_FETCH_DETAIL') {
+    fetchWorkitemDetail(event.data.workitemId);
+  }
+});
+
+async function fetchWorkitemDetail(workitemId: string) {
+  try {
+    const [defsResp, valuesResp] = await Promise.all([
+      originalFetch(`${FIELD_API_PATH}${workitemId}?_input_charset=utf-8`),
+      originalFetch(`${FIELD_VALUE_API_PATH}${workitemId}?_input_charset=utf-8`),
+    ]);
+    const [defsJson, valuesJson] = await Promise.all([
+      defsResp.json(),
+      valuesResp.json(),
+    ]);
+    processResponse(`${FIELD_API_PATH}${workitemId}`, defsJson);
+    processResponse(`${FIELD_VALUE_API_PATH}${workitemId}`, valuesJson);
+  } catch {}
+}

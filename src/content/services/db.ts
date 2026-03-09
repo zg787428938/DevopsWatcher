@@ -1,5 +1,5 @@
-// IndexedDB 持久化层：管理历史记录、需求池快照、需求变化、面板位置四类数据
-// 数据库版本 2：新增 changes store 用于需求变化持久化
+// IndexedDB 持久化层：管理历史记录、需求池快照、需求变化、面板位置、日志五类数据
+// 数据库版本 3：v2 新增 changes store，v3 新增 logs store
 
 import { CONFIG } from '../../config';
 import type { HistoryRecord, PoolSnapshot, PoolChange, Position, LogEntry } from '../../types';

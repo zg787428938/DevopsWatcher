@@ -1,4 +1,4 @@
-// 展开面板主组件：包含可拖拽标题栏、需求池卡片网格、状态栏、以及趋势图表/需求变化/历史记录三个折叠区域
+// 展开面板主组件：包含可拖拽标题栏、需求池卡片网格、状态栏、以及需求列表/趋势图表/需求变化/历史记录四个折叠区域
 // 标题栏标记 data-drag-handle 使其可拖拽移动，内容区标记 data-no-drag 防止滚动时误触拖拽
 
 import React from 'react';
@@ -9,6 +9,7 @@ import { PoolCards } from './PoolCards';
 import { StatusBar } from './StatusBar';
 import { TrendChart } from './TrendChart';
 import { ChangesSection } from './ChangesSection';
+import { RequirementsSection } from './RequirementsSection';
 import { HistorySection } from './HistorySection';
 
 interface Props {
@@ -58,12 +59,21 @@ export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
           memoryUsage={state.memoryUsage}
         />
 
+        <RequirementsSection
+          snapshots={state.poolSnapshots}
+          collapsed={state.requirementsCollapsed}
+          onToggle={() => store.setState({
+            requirementsCollapsed: !state.requirementsCollapsed,
+            ...(!state.requirementsCollapsed ? {} : { chartCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
+          })}
+        />
+
         <TrendChart
           history={state.history}
           collapsed={state.chartCollapsed}
           onToggle={() => store.setState({
             chartCollapsed: !state.chartCollapsed,
-            ...(!state.chartCollapsed ? {} : { changesCollapsed: true, historyCollapsed: true }),
+            ...(!state.chartCollapsed ? {} : { requirementsCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
           })}
         />
 
@@ -72,7 +82,7 @@ export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
           collapsed={state.changesCollapsed}
           onToggle={() => store.setState({
             changesCollapsed: !state.changesCollapsed,
-            ...(!state.changesCollapsed ? {} : { chartCollapsed: true, historyCollapsed: true }),
+            ...(!state.changesCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, historyCollapsed: true }),
           })}
         />
 
@@ -82,7 +92,7 @@ export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
           collapsed={state.historyCollapsed}
           onToggle={() => store.setState({
             historyCollapsed: !state.historyCollapsed,
-            ...(!state.historyCollapsed ? {} : { chartCollapsed: true, changesCollapsed: true }),
+            ...(!state.historyCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true }),
           })}
         />
       </div>

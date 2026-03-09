@@ -96,6 +96,10 @@ export const CONFIG = {
   apiPath: "/projex/api/workitem/workitem/list",
   // API 排除规则（参考值）：排除该路径的子路径如 /list/count
   apiExcludeSubPaths: ["/projex/api/workitem/workitem/list/"],
+  // 工作项字段定义 API 路径前缀，后接 workitemId（由 build.mjs 注入 inject.ts）
+  fieldApiPath: '/projex/api/workitem/workitem/field/',
+  // 工作项字段值 API 路径前缀，后接 workitemId（由 build.mjs 注入 inject.ts）
+  fieldValueApiPath: '/projex/api/workitem/workitem/field/value/',
 
   // 各监控目标按索引循环使用的颜色，同时用于趋势图折线和需求池卡片数字
   chartColors: ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899"],

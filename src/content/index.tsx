@@ -11,6 +11,7 @@ import { ApiBridge } from './services/api-bridge';
 import { db } from './services/db';
 import { Monitor } from './engine/monitor';
 import { TestRunner } from './engine/test-runner';
+import { WorkitemDetailService } from './services/workitem-detail';
 import { downloadLog } from './services/logger';
 import { App } from './ui/App';
 import { STYLES } from './ui/styles';
@@ -94,10 +95,13 @@ function mountUI() {
   root.render(<App />);
 }
 
+export const workitemDetailService = new WorkitemDetailService();
+
 async function main() {
   injectApiHook();
   const apiBridge = new ApiBridge();
   apiBridge.start();
+  workitemDetailService.start();
 
   let monitor: Monitor | null = null;
 

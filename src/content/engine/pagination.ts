@@ -6,22 +6,29 @@ import { store } from '../../store';
 import { simulateClick } from './click';
 import type { ApiBridge } from '../services/api-bridge';
 import type { Waiter } from './waiter';
-import type { ApiResponseData } from '../../types';
+import type { ApiResponseData, RequirementItem } from '../../types';
 
-// 从第一页数据出发，自动翻页收集所有需求名称，返回合并后的完整列表
+export interface CollectResult {
+  requirements: string[];
+  items: RequirementItem[];
+}
+
+// 从第一页数据出发，自动翻页收集所有需求名称和标识符
 export async function collectAllPages(
   apiBridge: ApiBridge,
   waiter: Waiter,
   firstPageData: ApiResponseData,
-): Promise<string[]> {
-  // 第一页数据已由调用方获取，直接提取需求名称
-  const allRequirements = firstPageData.result.map((r) => r.subject);
+): Promise<CollectResult> {
+  const requirements = firstPageData.result.map((r) => r.subject);
+  const items: RequirementItem[] = firstPageData.result.map((r) => ({
+    subject: r.subject,
+    identifier: r.identifier,
+  }));
   const pageSize = firstPageData.pageSize || 100;
   const totalPages = Math.ceil(firstPageData.totalCount / pageSize);
-  // 限制最大翻页数（默认 10），0 表示不限制
   const maxPages = CONFIG.maxPages > 0 ? Math.min(totalPages, CONFIG.maxPages) : totalPages;
 
-  if (maxPages <= 1) return allRequirements;
+  if (maxPages <= 1) return { requirements, items };
 
   for (let page = 2; page <= maxPages; page++) {
     const delay = CONFIG.paginationDelayMin +
@@ -47,16 +54,19 @@ export async function collectAllPages(
     await waiter.waitForContentReady();
 
     try {
-      // 等待 clickTime 之后到达的新鲜 API 响应，确保获取的是当前页的数据
       const pageData = await apiBridge.waitForFreshResponse(clickTime, 10_000);
-      allRequirements.push(...pageData.result.map((r) => r.subject));
+      requirements.push(...pageData.result.map((r) => r.subject));
+      items.push(...pageData.result.map((r) => ({
+        subject: r.subject,
+        identifier: r.identifier,
+      })));
     } catch {
       console.warn(`[DevOps Watcher] Failed to get page ${page} data`);
-      break; // 某一页获取失败时停止翻页，返回已收集到的部分数据
+      break;
     }
   }
 
-  return allRequirements;
+  return { requirements, items };
 }
 
 function sleep(ms: number): Promise<void> {

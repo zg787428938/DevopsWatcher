@@ -12,7 +12,7 @@ import { isContextValid, isRefreshPending } from './recovery';
 import { Scanner } from './scanner';
 import { Waiter } from './waiter';
 import { detectChanges } from './detector';
-import { collectAllPages } from './pagination';
+import { collectAllPages, type CollectResult } from './pagination';
 import { simulateClick } from './click';
 import type { PoolSnapshot, ApiResponseData, PoolChange } from '../../types';
 
@@ -152,12 +152,18 @@ export class TestRunner {
         checks.push(`pageSize 异常: ${apiData.pageSize}`);
       if (apiData.result.length > 0 && !apiData.result[0].subject)
         checks.push('result[0] 缺少 subject 字段');
+      if (apiData.result.length > 0 && !apiData.result[0].identifier)
+        checks.push('result[0] 缺少 identifier 字段（无法获取工作项详情）');
 
       if (checks.length > 0) {
         log('API', 'FAIL', 'API 数据结构异常', checks.join('\n'));
       } else {
         log('API', 'PASS', 'API 数据结构正常',
           `totalCount=${apiData.totalCount} resultLength=${apiData.result.length} toPage=${apiData.toPage} pageSize=${apiData.pageSize}`);
+        if (apiData.result.length > 0) {
+          log('API', 'PASS', 'identifier 字段',
+            `result[0].identifier="${apiData.result[0].identifier}" （工作项详情可用）`);
+        }
       }
 
       // URL 路径验证
@@ -451,6 +457,7 @@ export class TestRunner {
 
   private async collectAndLog(phase: string, poolName: string, apiData: ApiResponseData, didClick: boolean) {
     let allRequirements: string[];
+    let allItems: { subject: string; identifier: string }[];
     const pageSize = apiData.pageSize || 100;
     const totalPages = Math.ceil(apiData.totalCount / pageSize);
     log(phase, 'INFO', `"${poolName}" 分页信息`,
@@ -469,7 +476,9 @@ export class TestRunner {
           `toPage=${apiData.toPage}，collectAllPages 将从非第 1 页开始，数据可能不完整`);
       }
       const pageStart = Date.now();
-      allRequirements = await collectAllPages(this.apiBridge, this.waiter, apiData);
+      const collected = await collectAllPages(this.apiBridge, this.waiter, apiData);
+      allRequirements = collected.requirements;
+      allItems = collected.items;
       log(phase, 'INFO', `"${poolName}" 翻页完成 (${Date.now() - pageStart}ms)`, `collected=${allRequirements.length} items`);
 
       // 翻页完整性检查
@@ -480,6 +489,7 @@ export class TestRunner {
       }
     } else {
       allRequirements = apiData.result.map((r) => r.subject);
+      allItems = apiData.result.map(r => ({ subject: r.subject, identifier: r.identifier }));
     }
 
     // 去重：翻页期间数据变动可能导致同一需求出现在多页中
@@ -488,6 +498,12 @@ export class TestRunner {
       log(phase, 'WARN', `"${poolName}" 翻页数据重复`,
         `collected=${allRequirements.length} unique=${uniqueReqs.length}`);
       allRequirements = uniqueReqs;
+      const seen = new Set<string>();
+      allItems = allItems.filter(item => {
+        if (seen.has(item.subject)) return false;
+        seen.add(item.subject);
+        return true;
+      });
     }
 
     log(phase, 'INFO', `"${poolName}" 需求列表 (${allRequirements.length})`, allRequirements.map((r, i) => `${i + 1}. ${r}`).join('\n'));
@@ -498,7 +514,12 @@ export class TestRunner {
         `collected=${allRequirements.length} totalCount=${apiData.totalCount}，正式运行时会跳过变化检测`);
     }
 
-    const newSnapshot: PoolSnapshot = { poolName, totalCount: apiData.totalCount, requirements: allRequirements };
+    const newSnapshot: PoolSnapshot = { poolName, totalCount: apiData.totalCount, requirements: allRequirements, items: allItems };
+
+    // items 字段完整性校验
+    const hasIdentifiers = allItems.length > 0 && allItems.every((i: { identifier: string }) => i.identifier && i.identifier !== '');
+    log(phase, hasIdentifiers ? 'PASS' : 'WARN', `"${poolName}" items 字段`,
+      `count=${allItems.length} allHaveIdentifier=${hasIdentifiers}${!hasIdentifiers && allItems.length > 0 ? '（部分工作项缺少 identifier，详情功能受限）' : ''}`);
 
     const oldSnapshot = store.getState().poolSnapshots[poolName] ?? null;
     if (oldSnapshot) {
@@ -591,6 +612,31 @@ export class TestRunner {
     const content = shadow.querySelector('.dw-content');
     const sections = content?.querySelectorAll('.dw-section-header');
     log('UI', 'INFO', '折叠区域', `count=${sections?.length ?? 0}`);
+
+    // 6b. 需求列表区域验证
+    store.setState({ requirementsCollapsed: false, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+    await sleep(100);
+    const reqPools = shadow.querySelectorAll('.dw-req-pool');
+    const reqItems = shadow.querySelectorAll('.dw-req-item');
+    const reqPoolHeaders = shadow.querySelectorAll('.dw-req-pool-header');
+    log('UI', reqPools.length > 0 ? 'PASS' : 'WARN', '需求列表池分组',
+      `pools=${reqPools.length} expected=${CONFIG.targets.length} items=${reqItems.length}`);
+    reqPoolHeaders.forEach(header => {
+      const name = (header as HTMLElement).querySelector('.dw-changes-pool-name')?.textContent?.trim() ?? '';
+      const badge = (header as HTMLElement).querySelector('.dw-section-badge')?.textContent?.trim() ?? '';
+      log('UI', 'INFO', `需求池 "${name}"`, `badge=${badge}`);
+    });
+    if (reqItems.length > 0) {
+      const firstItem = reqItems[0] as HTMLElement;
+      const cursor = getComputedStyle(firstItem).cursor;
+      const idxEl = firstItem.querySelector('.dw-req-idx');
+      const nameEl = firstItem.querySelector('.dw-req-name');
+      const chevron = firstItem.querySelector('.dw-req-chevron');
+      log('UI', cursor === 'pointer' ? 'PASS' : 'WARN', '需求项可点击性',
+        `cursor=${cursor} idx=${idxEl?.textContent?.trim()} name="${nameEl?.textContent?.trim()?.slice(0, 30)}" chevron=${!!chevron}`);
+    }
+    store.setState({ requirementsCollapsed: true });
+    await sleep(100);
 
     // 7. 收起面板 → 回到悬浮球
     store.setState({ isExpanded: false });
@@ -687,16 +733,16 @@ export class TestRunner {
     }
 
     // 12. 手风琴模式：展开一个区域，其他自动收起
-    store.setState({ chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+    store.setState({ requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
     await sleep(100);
-    store.setState({ chartCollapsed: false });
+    store.setState({ chartCollapsed: false, requirementsCollapsed: true });
     await sleep(100);
     const afterChart = store.getState();
-    log('UI', !afterChart.chartCollapsed && afterChart.changesCollapsed && afterChart.historyCollapsed ? 'PASS' : 'WARN',
-      '手风琴-展开图表', `chart=${!afterChart.chartCollapsed} changes=${!afterChart.changesCollapsed} history=${!afterChart.historyCollapsed}`);
+    log('UI', !afterChart.chartCollapsed && afterChart.changesCollapsed && afterChart.historyCollapsed && afterChart.requirementsCollapsed ? 'PASS' : 'WARN',
+      '手风琴-展开图表', `requirements=${!afterChart.requirementsCollapsed} chart=${!afterChart.chartCollapsed} changes=${!afterChart.changesCollapsed} history=${!afterChart.historyCollapsed}`);
 
     // 需求变化 section 详细验证
-    store.setState({ changesCollapsed: false, chartCollapsed: true, historyCollapsed: true });
+    store.setState({ changesCollapsed: false, requirementsCollapsed: true, chartCollapsed: true, historyCollapsed: true });
     await sleep(100);
     const storeChanges = store.getState().changes;
     if (storeChanges.length > 0) {
@@ -758,7 +804,7 @@ export class TestRunner {
     }
 
     // 恢复折叠状态
-    store.setState({ chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+    store.setState({ requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
     await sleep(100);
 
     // 13. 滚动容器测试
@@ -787,7 +833,7 @@ export class TestRunner {
       });
 
       // 展开所有折叠区域后重新检测
-      store.setState({ chartCollapsed: false, changesCollapsed: false, historyCollapsed: false });
+      store.setState({ requirementsCollapsed: false, chartCollapsed: false, changesCollapsed: false, historyCollapsed: false });
       await sleep(200);
       const expandedScrollable = contentEl.scrollHeight > contentEl.clientHeight;
       log('UI', 'INFO', '全部展开后滚动',
@@ -817,7 +863,7 @@ export class TestRunner {
       log('UI', atTop ? 'PASS' : 'FAIL', '滚动回顶部', `scrollTop=${contentEl.scrollTop}`);
 
       // 恢复折叠状态
-      store.setState({ chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+      store.setState({ requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
     } else {
       log('UI', 'FAIL', '滚动容器 .dw-content 未找到');
     }
@@ -886,12 +932,18 @@ export class TestRunner {
       for (const snap of snapshots) {
         const isPartial = snap.requirements.length < snap.totalCount;
         const isTarget = CONFIG.targets.includes(snap.poolName);
+        const hasItems = Array.isArray(snap.items) && snap.items.length > 0;
+        const itemsHaveId = hasItems && snap.items!.every(i => i.identifier && i.identifier !== '');
         const status = !isTarget ? 'WARN' : isPartial ? 'WARN' : 'PASS';
         const detail = [
           `totalCount=${snap.totalCount}`,
           `requirements=${snap.requirements.length}`,
+          `items=${hasItems ? snap.items!.length : '无'}`,
+          `identifiers=${itemsHaveId ? '完整' : '缺失'}`,
           !isTarget ? '⚠ 非当前监控目标' : '',
           isPartial ? `⚠ 数据不完整（缺 ${snap.totalCount - snap.requirements.length} 条，可能为分页未完成）` : '',
+          !hasItems ? '⚠ 无 items 字段（旧快照，需求详情功能不可用）' : '',
+          hasItems && !itemsHaveId ? '⚠ 部分 items 缺少 identifier' : '',
         ].filter(Boolean).join(' ');
         log('IndexedDB', status, `快照 "${snap.poolName}"`, detail);
       }

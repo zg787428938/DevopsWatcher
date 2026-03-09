@@ -68,18 +68,19 @@ src/
 └── content/
     ├── index.tsx           # Content Script 入口（两阶段初始化）
     ├── services/
-    │   ├── api-bridge.ts   # API 数据桥接（缓存 + 异步等待 + 新鲜度隔离）
-    │   ├── countdown.ts    # 倒计时调度（wall-clock + 均匀分布）
-    │   ├── db.ts           # IndexedDB 封装（快照/历史/变化/位置/日志 五类数据，DB v3）
-    │   ├── logger.ts       # 统一日志服务（IndexedDB 持久化，正式/测试模式共享，上限 2000 条）
-    │   ├── memory.ts       # JS 堆内存监控
-    │   └── notification.ts # 桌面通知 + Web Audio 蜂鸣音（上下文有效性预检）
+    │   ├── api-bridge.ts       # API 数据桥接（缓存 + 异步等待 + 新鲜度隔离）
+    │   ├── countdown.ts        # 倒计时调度（wall-clock + 均匀分布）
+    │   ├── db.ts               # IndexedDB 封装（快照/历史/变化/位置/日志 五类数据，DB v3）
+    │   ├── logger.ts           # 统一日志服务（IndexedDB 持久化，正式/测试模式共享，上限 2000 条）
+    │   ├── memory.ts           # JS 堆内存监控
+    │   ├── notification.ts     # 桌面通知 + Web Audio 蜂鸣音（上下文有效性预检）
+    │   └── workitem-detail.ts  # 工作项详情服务（字段定义+字段值合并，主动获取+缓存）
     ├── engine/
     │   ├── monitor.ts      # 监控核心编排器（分页回退 + 数据完整性校验 + 去重）
     │   ├── scanner.ts      # 侧边栏菜单 DOM 扫描（带坐标缓存）
     │   ├── waiter.ts       # 三段式内容就绪等待
     │   ├── detector.ts     # 快照比对（新增/移除检测）
-    │   ├── pagination.ts   # 模拟翻页收集全量数据
+    │   ├── pagination.ts   # 模拟翻页收集全量数据（返回 requirements + items）
     │   ├── click.ts        # 模拟真实用户点击（Pointer+Mouse 事件序列）
     │   ├── recovery.ts     # 异常恢复（内存超限/API 超时延迟至轮次结束后刷新，上下文失效立即刷新）
     │   └── test-runner.ts  # 诊断测试套件（10 Phase + Summary）
@@ -91,6 +92,7 @@ src/
         ├── PoolCards.tsx   # 需求池卡片（动态列数）
         ├── StatusBar.tsx   # 状态栏
         ├── TrendChart.tsx  # 趋势折线图（Chart.js）
+        ├── RequirementsSection.tsx # 需求列表（按池分组，点击获取工作项详情）
         ├── ChangesSection.tsx # 需求变化列表（按池分组、持久化、带时间戳）
         ├── HistorySection.tsx # 历史记录（无限滚动 + 差值显示）
         ├── DragWrapper.tsx # 拖拽容器（中心锚点边界检测）
@@ -139,9 +141,13 @@ src/
 
 - 运行在页面上下文（非 content script 隔离环境）
 - 劫持 `window.fetch` 和 `XMLHttpRequest.prototype.open/send`
-- 目标 API 路径通过构建时注入：`build.mjs` 从 `config.ts` 提取 `apiPath`，通过 Vite `define` 注入 `__INJECT_API_PATH__` 编译时常量
-- 精确匹配路径，排除子路径（如 `/list/count`）
+- 目标 API 路径通过构建时注入：`build.mjs` 从 `config.ts` 提取路径，通过 Vite `define` 注入编译时常量（`__INJECT_API_PATH__`、`__INJECT_FIELD_API_PATH__`、`__INJECT_FIELD_VALUE_API_PATH__`）
+- 拦截三类 API：
+  - **列表 API**（`/workitem/list`）：精确匹配路径，排除子路径（如 `/list/count`），提取 `subject` + `identifier`
+  - **字段定义 API**（`/workitem/field/{id}`）：提取工作项字段元信息
+  - **字段值 API**（`/workitem/field/value/{id}`）：提取工作项字段值
 - 拦截到的数据通过 `window.postMessage` 发送给 content script
+- **主动获取**：监听 `DEVOPS_WATCHER_FETCH_DETAIL` 消息，使用 `originalFetch` 发起同源 GET 请求获取指定工作项的字段定义和字段值，响应通过 `processResponse` 走已有管道分发
 
 ### 内容就绪等待（waiter.ts）
 
@@ -164,6 +170,18 @@ offset[i] = T * (i + 1) / (totalOps + 1)
 - 使用 wall-clock（`Date.now()` 绝对时间戳）计算，不受后台标签页 `setInterval` 节流影响
 - 倒计时显示使用 `Math.round` 而非 `Math.ceil`，消除 timer jitter 导致的秒数跳跃
 - 互斥锁确保同一时间只有一个操作在执行
+
+### 工作项详情获取（workitem-detail.ts）
+
+按需获取单个工作项的字段详情，供 UI 展示：
+
+1. UI 点击需求 → `workitemDetailService.fetchDetail(workitemId)`
+2. 服务通过 `window.postMessage` 发送 `DEVOPS_WATCHER_FETCH_DETAIL` 给 inject.ts
+3. inject.ts 使用 `originalFetch` 并行请求字段定义 API 和字段值 API（同源 GET，浏览器自动携带 cookie）
+4. 响应经 `processResponse` 管道分发为 `DEVOPS_WATCHER_FIELD_DEFS` 和 `DEVOPS_WATCHER_FIELD_VALUES` 消息
+5. 服务缓存两份数据，合并为 `WorkitemDetail` 后 resolve 等待中的 Promise
+
+缓存策略：按 `workitemId` 缓存，最多保留 50 条，超出时淘汰最久未更新的条目。已缓存的详情再次请求时直接返回。
 
 ### 首轮初始池跳过
 
@@ -206,12 +224,12 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | 字段 | 说明 |
 |---|---|
 | `isMonitoring` | 是否正在监控 |
-| `poolSnapshots` | 各池最新快照（`Map<poolName, PoolSnapshot>`） |
+| `poolSnapshots` | 各池最新快照（`Record<string, PoolSnapshot>`） |
 | `history` | 历史记录数组（内存中保留最近一页） |
 | `changes` | 需求变化数组（全量累积，上限 `maxChangesRecords`） |
 | `countdown` | 倒计时秒数 |
 | `isExpanded` | 面板是否展开 |
-| `chartCollapsed` / `changesCollapsed` / `historyCollapsed` | 折叠区域状态（互斥展开） |
+| `requirementsCollapsed` / `chartCollapsed` / `changesCollapsed` / `historyCollapsed` | 折叠区域状态（互斥展开） |
 | `collapsedPos` / `expandedPos` | 拖拽位置坐标 |
 
 ---
@@ -221,6 +239,9 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | 方向 | 机制 | 消息类型 |
 |---|---|---|
 | inject → content | `window.postMessage` | `DEVOPS_WATCHER_API_RESPONSE` |
+| inject → content | `window.postMessage` | `DEVOPS_WATCHER_FIELD_DEFS`（工作项字段定义） |
+| inject → content | `window.postMessage` | `DEVOPS_WATCHER_FIELD_VALUES`（工作项字段值） |
+| content → inject | `window.postMessage` | `DEVOPS_WATCHER_FETCH_DETAIL`（请求工作项详情） |
 | content → background | `chrome.runtime.sendMessage` | `CREATE_NOTIFICATION` / `CLOSE_TAB` |
 | popup → content | `chrome.tabs.sendMessage` | `QUERY_STATE` / `SET_MONITORING` / `DOWNLOAD_LOG` / `RESET_POSITION` |
 
@@ -250,13 +271,13 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | Phase | 名称 | 说明 |
 |---|---|---|
 | 1 | Environment | URL、UA、版本号、CONFIG、Shadow DOM、激活状态、inject.js 注入验证 |
-| 2 | API | API 拦截验证 + 数据结构校验（totalCount/result/toPage/pageSize/subject） |
+| 2 | API | API 拦截验证 + 数据结构校验（totalCount/result/toPage/pageSize/subject/identifier） |
 | 3 | Scanner | 侧边栏菜单扫描 |
 | 4 | InitialCollect | 当前页面数据提取 + 多页感知（非首页时跳过快照保存避免误报） |
-| 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 |
-| 6 | UI | 悬浮球/面板/卡片点色/变化区块结构/数量差值/文字可选择性/scrollbar-gutter 稳定性 |
+| 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 + items/identifier 完整性 |
+| 6 | UI | 悬浮球/面板/卡片点色/需求列表（池分组+点击性+序号+展开箭头）/变化区块结构/数量差值/文字可选择性/scrollbar-gutter 稳定性 |
 | 7 | Notification | 上下文有效性预检 + 桌面通知 + 蜂鸣音 + 权限状态 |
-| 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性/日志持久化(`logs` store 记录数 + `ts` 字段完整性) |
+| 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性/日志持久化(`logs` store 记录数 + `ts` 字段完整性)/快照 items 字段+identifier 完整性 |
 | 9 | Memory | JS 堆内存 + 80% 阈值预警 |
 | 10 | RuntimeHealth | 扩展上下文/API Bridge 一致性/Recovery 计算/DOM 选择器/分页状态/Store 状态/延迟刷新状态(`isRefreshPending`)/日志 `ts` 字段完整性 |
 | — | Summary | 按 Phase 汇总 PASS/FAIL/WARN 计数，列出所有 FAIL 和 WARN 详情 |
@@ -272,7 +293,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | 入口 | 输出格式 | 文件 | 特殊处理 |
 |---|---|---|---|
 | `src/content/index.tsx` | IIFE | `dist/content.js` | `@vitejs/plugin-react` 处理 JSX |
-| `src/inject/index.ts` | IIFE | `dist/inject.js` | `define` 注入 `__INJECT_API_PATH__` |
+| `src/inject/index.ts` | IIFE | `dist/inject.js` | `define` 注入 `__INJECT_API_PATH__` / `__INJECT_FIELD_API_PATH__` / `__INJECT_FIELD_VALUE_API_PATH__` |
 | `src/background/index.ts` | ES Module | `dist/background.js` | — |
 | `src/popup/index.ts` | IIFE | `dist/popup.js` | — |
 
@@ -318,7 +339,7 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 `setInterval(1000)` 的实际间隔有 ±几十毫秒的 jitter。`Math.ceil` 在整数边界附近会使连续两次 tick 的计算结果相差 2（例如 `ceil(93.01)=94` → `ceil(91.99)=92`，跳过 93）。`Math.round` 消除了此问题。
 
 ### 为什么折叠区域互斥展开（手风琴模式）？
-趋势图表、需求变化、历史记录三个区域展开时各自可能占据大量高度。如果同时展开，面板总高度会远超视口，用户需要在外层滚动条和内层滚动条之间来回操作。互斥模式确保任一时刻只有一个区域展开，消除嵌套滚动问题。
+需求列表、趋势图表、需求变化、历史记录四个区域展开时各自可能占据大量高度。如果同时展开，面板总高度会远超视口，用户需要在外层滚动条和内层滚动条之间来回操作。互斥模式确保任一时刻只有一个区域展开，消除嵌套滚动问题。
 
 ### 为什么 finalizePool 要做数据完整性校验？
 多页需求池翻页时可能因 DOM 状态残留、网络波动等原因导致某一页数据丢失。如果将不完整的数据保存为快照并与上次比对，会产生大量虚假的"需求被移除"变化。`finalizePool` 在保存快照前检查 `collected !== totalCount`，不匹配时跳过本轮变化检测并保留旧快照，避免级联误报。

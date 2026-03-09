@@ -15,10 +15,11 @@ import { Waiter } from './waiter';
 import { detectChanges } from './detector';
 import { startRecovery, stopRecovery, isRefreshPending, safeRefresh } from './recovery';
 import { simulateClick } from './click';
-import type { PoolSnapshot, HistoryRecord, ApiResponseData } from '../../types';
+import type { PoolSnapshot, HistoryRecord, ApiResponseData, RequirementItem } from '../../types';
 
 interface PoolPageState {
   requirements: string[];
+  items: RequirementItem[];
   totalCount: number;
   totalPages: number;
   pagesCollected: number;
@@ -128,7 +129,8 @@ export class Monitor {
       } else {
         // 单页池：数据完整，直接保存为基准快照（不做变化检测，避免刷新后误报）
         const requirements = initialData.result.map(r => r.subject);
-        const snapshot: PoolSnapshot = { poolName: currentPool, totalCount: initialData.totalCount, requirements };
+        const items = initialData.result.map(r => ({ subject: r.subject, identifier: r.identifier }));
+        const snapshot: PoolSnapshot = { poolName: currentPool, totalCount: initialData.totalCount, requirements, items };
         store.updatePoolSnapshot(currentPool, snapshot);
         await db.saveSnapshot(snapshot);
         log('InitialCollect', 'PASS', `"${currentPool}" 初始快照已保存`);
@@ -257,12 +259,14 @@ export class Monitor {
       const rawPages = Math.ceil(apiData.totalCount / pageSize);
       const totalPages = CONFIG.maxPages > 0 ? Math.min(rawPages, CONFIG.maxPages) : rawPages;
       const requirements = apiData.result.map(r => r.subject);
+      const items = apiData.result.map(r => ({ subject: r.subject, identifier: r.identifier }));
 
       if (totalPages <= 1) {
-        await this.finalizePool(poolName, apiData.totalCount, requirements);
+        await this.finalizePool(poolName, apiData.totalCount, requirements, items);
       } else {
         this.poolStates.set(poolIndex, {
           requirements,
+          items,
           totalCount: apiData.totalCount,
           totalPages,
           pagesCollected: 1,
@@ -301,7 +305,7 @@ export class Monitor {
     const nextBtn = document.querySelector(CONFIG.selectors.nextPageBtn) as HTMLElement | null;
     if (!nextBtn || nextBtn.hasAttribute('disabled') || nextBtn.classList.contains('next-disabled')) {
       log('CheckPool', 'WARN', `"${poolName}" 翻页按钮不可用，提前结束`);
-      await this.finalizePool(poolName, state.totalCount, state.requirements);
+      await this.finalizePool(poolName, state.totalCount, state.requirements, state.items);
       this.poolStates.delete(poolIndex);
       return;
     }
@@ -315,11 +319,12 @@ export class Monitor {
     try {
       const pageData = await this.apiBridge.waitForFreshResponse(clickTime, 10_000);
       state.requirements.push(...pageData.result.map(r => r.subject));
+      state.items.push(...pageData.result.map(r => ({ subject: r.subject, identifier: r.identifier })));
       state.pagesCollected++;
       log('CheckPool', 'PASS', `"${poolName}" 翻页 ${page} 完成`, `collected=${state.requirements.length}`);
     } catch {
       log('CheckPool', 'WARN', `"${poolName}" 翻页 ${page} 失败，提前结束`);
-      await this.finalizePool(poolName, state.totalCount, state.requirements);
+      await this.finalizePool(poolName, state.totalCount, state.requirements, state.items);
       this.poolStates.delete(poolIndex);
       return;
     }
@@ -327,7 +332,7 @@ export class Monitor {
     const isLastScheduled = (pageIndex + 1) >= (this.estimatedPages[poolIndex] || 1);
 
     if (state.pagesCollected >= state.totalPages) {
-      await this.finalizePool(poolName, state.totalCount, state.requirements);
+      await this.finalizePool(poolName, state.totalCount, state.requirements, state.items);
       this.poolStates.delete(poolIndex);
     } else if (isLastScheduled) {
       // 实际页数 > 预估页数，补充翻页（使用 paginationDelay 间隔）
@@ -367,6 +372,7 @@ export class Monitor {
       try {
         const pageData = await this.apiBridge.waitForFreshResponse(clickTime, 10_000);
         state.requirements.push(...pageData.result.map(r => r.subject));
+        state.items.push(...pageData.result.map(r => ({ subject: r.subject, identifier: r.identifier })));
         state.pagesCollected++;
         log('CheckPool', 'PASS', `"${poolName}" 补充翻页 ${page} 完成`, `collected=${state.requirements.length}`);
       } catch {
@@ -375,7 +381,7 @@ export class Monitor {
       }
     }
 
-    await this.finalizePool(poolName, state.totalCount, state.requirements);
+    await this.finalizePool(poolName, state.totalCount, state.requirements, state.items);
     this.poolStates.delete(poolIndex);
   }
 
@@ -424,13 +430,19 @@ export class Monitor {
 
   // ── 最终处理：快照比对 → 持久化 → 通知 ──
 
-  private async finalizePool(poolName: string, totalCount: number, requirements: string[]) {
+  private async finalizePool(poolName: string, totalCount: number, requirements: string[], items: RequirementItem[]) {
     // 去重：翻页期间数据变动可能导致同一需求出现在多页中
     const uniqueReqs = [...new Set(requirements)];
     if (uniqueReqs.length < requirements.length) {
       log('CheckPool', 'WARN', `"${poolName}" 翻页数据重复`,
         `collected=${requirements.length} unique=${uniqueReqs.length} duplicates=${requirements.length - uniqueReqs.length}`);
       requirements = uniqueReqs;
+      const seen = new Set<string>();
+      items = items.filter(item => {
+        if (seen.has(item.subject)) return false;
+        seen.add(item.subject);
+        return true;
+      });
     }
 
     // 翻页数据完整性校验：collected !== totalCount 说明翻页期间后端数据发生了变化
@@ -442,7 +454,7 @@ export class Monitor {
       return;
     }
 
-    const newSnapshot: PoolSnapshot = { poolName, totalCount, requirements };
+    const newSnapshot: PoolSnapshot = { poolName, totalCount, requirements, items };
     const oldSnapshot = store.getState().poolSnapshots[poolName] ?? null;
     const change = detectChanges(oldSnapshot, newSnapshot);
 

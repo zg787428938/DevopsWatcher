@@ -30,6 +30,7 @@ const initialState: MonitorState = {
   chartCollapsed: true, // 趋势图表默认折叠，减少初始渲染开销
   changesCollapsed: false, // 需求变化默认展开，便于第一时间查看
   historyCollapsed: true,
+  requirementsCollapsed: true,
   currentRound: 0,
   isTesting: false,
 };

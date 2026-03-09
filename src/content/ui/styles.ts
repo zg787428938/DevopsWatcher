@@ -511,6 +511,161 @@ export const STYLES = `
 }
 .dw-section-body:hover::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.14); }
 
+/* ── 需求列表 ── */
+.dw-req-pool {
+  margin-bottom: 14px;
+}
+.dw-req-pool:last-child { margin-bottom: 0; }
+.dw-req-pool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  padding: 7px 10px;
+  background: #f8fafc;
+  border-radius: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  user-select: none;
+}
+.dw-req-list {
+  padding: 0;
+}
+.dw-req-item-wrap {
+  border-bottom: 1px solid #f8fafc;
+}
+.dw-req-item-wrap:last-child { border-bottom: none; }
+.dw-req-item-wrap.expanded {
+  background: #f8fafc;
+  border-radius: 8px;
+  border-bottom-color: transparent;
+  margin-bottom: 4px;
+}
+.dw-req-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #334155;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  user-select: text;
+}
+.dw-req-item:hover {
+  background: #f1f5f9;
+}
+.dw-req-item-wrap.expanded > .dw-req-item {
+  background: transparent;
+}
+.dw-req-item-wrap.expanded > .dw-req-item:hover {
+  background: rgba(0,0,0,0.02);
+}
+.dw-req-idx {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: right;
+  font-size: 10px;
+  font-weight: 600;
+  color: #c0c8d4;
+  line-height: 1.5;
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+}
+.dw-req-name {
+  flex: 1;
+  word-break: break-all;
+}
+.dw-req-chevron {
+  color: #c0c8d4;
+  flex-shrink: 0;
+  margin-top: 3px;
+  transition: transform 0.2s ease, color 0.15s ease;
+}
+.dw-req-item:hover .dw-req-chevron {
+  color: #94a3b8;
+}
+.dw-req-chevron.open {
+  transform: rotate(90deg);
+  color: #6366f1;
+}
+.dw-req-detail {
+  padding: 2px 10px 10px 33px;
+}
+.dw-req-detail-msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 4px 0;
+}
+.dw-req-detail-msg.error {
+  color: #dc2626;
+}
+.dw-req-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #e0e7ff;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: dw-spin 0.6s linear infinite;
+}
+@keyframes dw-spin {
+  to { transform: rotate(360deg); }
+}
+.dw-req-retry {
+  background: none;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  margin-left: 4px;
+  transition: all 0.15s ease;
+}
+.dw-req-retry:hover {
+  background: #fef2f2;
+}
+.dw-req-detail-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: #ffffff;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  padding: 6px 0;
+  overflow: hidden;
+}
+.dw-req-field {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 3px 10px;
+  transition: background 0.1s ease;
+}
+.dw-req-field:hover {
+  background: #f8fafc;
+}
+.dw-req-field-label {
+  color: #94a3b8;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 56px;
+  text-align: right;
+  font-weight: 500;
+}
+.dw-req-field-value {
+  color: #334155;
+  word-break: break-all;
+}
+
 /* ── 通用工具类 ── */
 .color-normal { color: #059669; }
 .color-warning { color: #d97706; }
