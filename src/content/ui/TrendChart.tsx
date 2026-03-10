@@ -1,6 +1,3 @@
-/**
- * TrendChart.tsx - 趋势图表组件，基于 Chart.js 渲染各目标池（pool）数量随时间变化的折线图，支持折叠/展开和响应式更新
- */
 import React, { useRef, useEffect } from 'react';
 import {
   Chart,
@@ -24,7 +21,7 @@ interface Props {
   onToggle: () => void;
 }
 
-export const TrendChart: React.FC<Props> = ({ history, collapsed, onToggle }) => {
+export const TrendChart: React.FC<Props> = React.memo(({ history, collapsed, onToggle }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
 
@@ -75,7 +72,6 @@ export const TrendChart: React.FC<Props> = ({ history, collapsed, onToggle }) =>
       }
     }
 
-    // 延迟创建图表，避免频繁重绘导致卡顿（由 CONFIG.chartRedrawDelay 控制）
     const timer = setTimeout(() => {
       if (!canvasRef.current) return;
       chartRef.current = new Chart(canvasRef.current, {
@@ -127,19 +123,14 @@ export const TrendChart: React.FC<Props> = ({ history, collapsed, onToggle }) =>
       });
     }, CONFIG.chartRedrawDelay);
 
-    // 清理定时器，防止组件卸载后仍执行创建逻辑
     return () => {
       clearTimeout(timer);
+      if (chartRef.current) {
+        chartRef.current.destroy();
+        chartRef.current = null;
+      }
     };
   }, [history, collapsed]);
-
-  // 组件卸载时销毁图表实例，释放内存
-  useEffect(() => {
-    return () => {
-      chartRef.current?.destroy();
-      chartRef.current = null;
-    };
-  }, []);
 
   return (
     <div className="dw-section">
@@ -148,7 +139,7 @@ export const TrendChart: React.FC<Props> = ({ history, collapsed, onToggle }) =>
           趋势图表
           <span className="dw-section-badge">{Math.min(history.length, CONFIG.chartMaxPoints)}</span>
         </span>
-        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
           <path d="M3.5 2L7 5L3.5 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </div>
@@ -161,4 +152,4 @@ export const TrendChart: React.FC<Props> = ({ history, collapsed, onToggle }) =>
       )}
     </div>
   );
-};
+});

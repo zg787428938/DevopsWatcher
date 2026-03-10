@@ -6,7 +6,7 @@ interface Props {
   snapshots: Record<string, PoolSnapshot>;
 }
 
-export const PoolCards: React.FC<Props> = ({ snapshots }) => {
+export const PoolCards: React.FC<Props> = React.memo(({ snapshots }) => {
   const cols = Math.min(CONFIG.targets.length, 2);
 
   return (
@@ -33,4 +33,4 @@ export const PoolCards: React.FC<Props> = ({ snapshots }) => {
       })}
     </div>
   );
-};
+});

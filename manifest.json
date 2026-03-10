@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DevOps Watcher",
-  "version": "1.0.22",
+  "version": "1.0.27",
   "description": "Monitor Alibaba Cloud DevOps requirement pools in real-time",
   "permissions": [
     "notifications",

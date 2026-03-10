@@ -1,6 +1,3 @@
-/**
- * HistorySection.tsx - 历史记录区块组件，按时间倒序展示各目标池的数量快照，支持滚动加载更多记录并显示与上一条的差值
- */
 import React, { useCallback, useRef, useEffect, useState } from 'react';
 import { CONFIG, getTargetColor, formatTimestamp } from '../../config';
 import { db } from '../services/db';
@@ -13,7 +10,7 @@ interface Props {
   onToggle: () => void;
 }
 
-export const HistorySection: React.FC<Props> = ({ history, historyTotal, collapsed, onToggle }) => {
+export const HistorySection: React.FC<Props> = React.memo(({ history, historyTotal, collapsed, onToggle }) => {
   const [loadingMore, setLoadingMore] = useState(false);
   const [extraRecords, setExtraRecords] = useState<HistoryRecord[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -54,7 +51,7 @@ export const HistorySection: React.FC<Props> = ({ history, historyTotal, collaps
           历史记录
           <span className="dw-section-badge">{historyTotal}</span>
         </span>
-        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
           <path d="M3.5 2L7 5L3.5 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </div>
@@ -84,7 +81,7 @@ export const HistorySection: React.FC<Props> = ({ history, historyTotal, collaps
                       const color = getTargetColor(tIdx);
                       return (
                         <span key={target} className="dw-history-pool" title={target}>
-                          <span className="dw-history-pool-dot" style={{ background: color }} />
+                          <span className="dw-pool-dot" style={{ background: color }} />
                           <span className="dw-history-pool-count" style={{ color }}>
                             {count}
                           </span>
@@ -112,4 +109,4 @@ export const HistorySection: React.FC<Props> = ({ history, historyTotal, collaps
       )}
     </div>
   );
-};
+});

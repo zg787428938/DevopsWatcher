@@ -31,6 +31,7 @@ const initialState: MonitorState = {
   changesCollapsed: false, // 需求变化默认展开，便于第一时间查看
   historyCollapsed: true,
   requirementsCollapsed: true,
+  detailView: null,
   currentRound: 0,
   isTesting: false,
 };

@@ -233,7 +233,7 @@ export const STYLES = `
 .dw-memory-text {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  color: #94a3b8;
+  color: #64748b;
   font-size: 11px;
 }
 
@@ -270,8 +270,11 @@ export const STYLES = `
   margin-left: 8px;
   letter-spacing: 0.02em;
 }
+.dw-pool-label > .dw-section-badge {
+  margin-left: 4px;
+}
 .dw-section-arrow {
-  color: #94a3b8;
+  color: #64748b;
   font-size: 9px;
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -280,6 +283,11 @@ export const STYLES = `
   padding: 10px 14px 14px;
   border-top: 1px solid #f1f5f9;
   scrollbar-gutter: stable;
+  animation: dw-section-open 0.2s ease;
+}
+@keyframes dw-section-open {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ── 趋势图表 ── */
@@ -292,6 +300,23 @@ export const STYLES = `
   height: 100% !important;
 }
 
+/* ── 池分组共享样式（需求列表、需求变化共用） ── */
+.dw-pool-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dw-pool-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 /* ── 需求变化 ── */
 .dw-changes-pool {
   margin-bottom: 14px;
@@ -302,21 +327,13 @@ export const STYLES = `
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 13px;
   background: #f8fafc;
   border-radius: 8px;
   position: sticky;
   top: 0;
   z-index: 1;
   user-select: none;
-}
-.dw-changes-pool-name {
-  font-weight: 600;
-  font-size: 13px;
-  color: #1e293b;
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 .dw-changes-clear {
   background: none;
@@ -334,6 +351,15 @@ export const STYLES = `
   border-color: #cbd5e1;
   color: #64748b;
 }
+.dw-changes-clear.confirming {
+  border-color: #fecaca;
+  color: #dc2626;
+  background: #fef2f2;
+}
+.dw-changes-clear.confirming:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
 .dw-changes-entry {
   padding: 10px 0;
   border-bottom: 1px solid #f1f5f9;
@@ -348,7 +374,7 @@ export const STYLES = `
 }
 .dw-changes-time {
   font-size: 11px;
-  color: #94a3b8;
+  color: #64748b;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
   white-space: nowrap;
@@ -450,7 +476,7 @@ export const STYLES = `
 }
 .dw-history-item:last-child { border-bottom: none; }
 .dw-history-time {
-  color: #94a3b8;
+  color: #64748b;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   font-size: 11px;
@@ -470,13 +496,7 @@ export const STYLES = `
   align-items: center;
   gap: 3px;
 }
-.dw-history-pool-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
+/* dw-history-pool-dot 已合并到共享的 dw-pool-dot */
 .dw-history-pool-count {
   font-weight: 700;
   margin-left: 1px;
@@ -521,7 +541,7 @@ export const STYLES = `
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 13px;
   background: #f8fafc;
   border-radius: 8px;
   position: sticky;
@@ -536,12 +556,6 @@ export const STYLES = `
   border-bottom: 1px solid #f8fafc;
 }
 .dw-req-item-wrap:last-child { border-bottom: none; }
-.dw-req-item-wrap.expanded {
-  background: #f8fafc;
-  border-radius: 8px;
-  border-bottom-color: transparent;
-  margin-bottom: 4px;
-}
 .dw-req-item {
   display: flex;
   align-items: flex-start;
@@ -558,11 +572,12 @@ export const STYLES = `
 .dw-req-item:hover {
   background: #f1f5f9;
 }
-.dw-req-item-wrap.expanded > .dw-req-item {
-  background: transparent;
+.dw-req-item.disabled {
+  cursor: default;
+  opacity: 0.6;
 }
-.dw-req-item-wrap.expanded > .dw-req-item:hover {
-  background: rgba(0,0,0,0.02);
+.dw-req-item.disabled:hover {
+  background: transparent;
 }
 .dw-req-idx {
   flex-shrink: 0;
@@ -570,7 +585,7 @@ export const STYLES = `
   text-align: right;
   font-size: 10px;
   font-weight: 600;
-  color: #c0c8d4;
+  color: #8a919c;
   line-height: 1.5;
   margin-top: 1px;
   font-variant-numeric: tabular-nums;
@@ -580,36 +595,18 @@ export const STYLES = `
   word-break: break-all;
 }
 .dw-req-chevron {
-  color: #c0c8d4;
+  color: #8a919c;
   flex-shrink: 0;
   margin-top: 3px;
-  transition: transform 0.2s ease, color 0.15s ease;
+  transition: color 0.15s ease;
 }
 .dw-req-item:hover .dw-req-chevron {
-  color: #94a3b8;
-}
-.dw-req-chevron.open {
-  transform: rotate(90deg);
-  color: #6366f1;
-}
-.dw-req-detail {
-  padding: 2px 10px 10px 33px;
-}
-.dw-req-detail-msg {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: #94a3b8;
-  padding: 4px 0;
-}
-.dw-req-detail-msg.error {
-  color: #dc2626;
+  color: #64748b;
 }
 .dw-req-spinner {
   display: inline-block;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border: 2px solid #e0e7ff;
   border-top-color: #6366f1;
   border-radius: 50%;
@@ -623,8 +620,8 @@ export const STYLES = `
   border: 1px solid #fecaca;
   color: #dc2626;
   cursor: pointer;
-  font-size: 10px;
-  padding: 1px 8px;
+  font-size: 11px;
+  padding: 2px 10px;
   border-radius: 4px;
   margin-left: 4px;
   transition: all 0.15s ease;
@@ -632,38 +629,124 @@ export const STYLES = `
 .dw-req-retry:hover {
   background: #fef2f2;
 }
-.dw-req-detail-fields {
+
+/* ── 需求详情页（独立全屏视图） ── */
+.dw-detail-page {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  background: #ffffff;
-  border: 1px solid #f1f5f9;
-  border-radius: 8px;
-  padding: 6px 0;
-  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+  animation: dw-detail-in 0.2s ease;
 }
-.dw-req-field {
+@keyframes dw-detail-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.dw-detail-header {
   display: flex;
+  align-items: flex-start;
   gap: 8px;
+  padding: 14px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #f1f5f9;
+  flex-shrink: 0;
+  cursor: grab;
+}
+.dw-detail-header:active { cursor: grabbing; }
+.dw-detail-back {
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  margin-top: -2px;
+}
+.dw-detail-back:hover {
+  background: #f1f5f9;
+  color: #334155;
+}
+.dw-detail-title-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dw-detail-id {
   font-size: 11px;
-  line-height: 1.5;
-  padding: 3px 10px;
+  color: #6366f1;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.dw-detail-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.4;
+  word-break: break-all;
+}
+.dw-detail-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding: 12px 14px 16px;
+  user-select: text;
+}
+.dw-detail-content::-webkit-scrollbar { width: 5px; }
+.dw-detail-content::-webkit-scrollbar-track { background: transparent; }
+.dw-detail-content::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+}
+.dw-detail-content:hover::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.14); }
+.dw-detail-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #64748b;
+  padding: 32px 16px;
+}
+.dw-detail-status.error {
+  color: #dc2626;
+}
+.dw-detail-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.dw-detail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
   transition: background 0.1s ease;
 }
-.dw-req-field:hover {
+.dw-detail-field:hover {
   background: #f8fafc;
 }
-.dw-req-field-label {
-  color: #94a3b8;
-  white-space: nowrap;
-  flex-shrink: 0;
-  min-width: 56px;
-  text-align: right;
-  font-weight: 500;
+.dw-detail-field-label {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+  line-height: 1.3;
 }
-.dw-req-field-value {
-  color: #334155;
-  word-break: break-all;
+.dw-detail-field-value {
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 /* ── 通用工具类 ── */

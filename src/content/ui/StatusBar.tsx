@@ -1,6 +1,3 @@
-/**
- * 状态栏组件：展示当前监控状态文本（含颜色区分 error/warning/ok）以及内存使用量（usedMB、percent），内存超阈值时变色。
- */
 import React from 'react';
 import type { MonitorState } from '../../types';
 
@@ -10,7 +7,7 @@ interface Props {
   memoryUsage: MonitorState['memoryUsage'];
 }
 
-export const StatusBar: React.FC<Props> = ({ status, statusType, memoryUsage }) => {
+export const StatusBar: React.FC<Props> = React.memo(({ status, statusType, memoryUsage }) => {
   const statusColor =
     statusType === 'error' ? '#dc2626' : statusType === 'warning' ? '#d97706' : '#059669';
 
@@ -34,4 +31,4 @@ export const StatusBar: React.FC<Props> = ({ status, statusType, memoryUsage }) 
       )}
     </div>
   );
-};
+});

@@ -622,7 +622,7 @@ export class TestRunner {
     log('UI', reqPools.length > 0 ? 'PASS' : 'WARN', '需求列表池分组',
       `pools=${reqPools.length} expected=${CONFIG.targets.length} items=${reqItems.length}`);
     reqPoolHeaders.forEach(header => {
-      const name = (header as HTMLElement).querySelector('.dw-changes-pool-name')?.textContent?.trim() ?? '';
+      const name = (header as HTMLElement).querySelector('.dw-pool-label')?.textContent?.trim() ?? '';
       const badge = (header as HTMLElement).querySelector('.dw-section-badge')?.textContent?.trim() ?? '';
       log('UI', 'INFO', `需求池 "${name}"`, `badge=${badge}`);
     });
@@ -636,6 +636,157 @@ export class TestRunner {
         `cursor=${cursor} idx=${idxEl?.textContent?.trim()} name="${nameEl?.textContent?.trim()?.slice(0, 30)}" chevron=${!!chevron}`);
     }
     store.setState({ requirementsCollapsed: true });
+    await sleep(100);
+
+    // 6c. 需求详情页测试（独立视图导航 + 渲染 + 滚动）
+    const detailSnapshots = store.getState().poolSnapshots;
+    let testDetailItem: { identifier: string; subject: string } | null = null;
+    for (const target of CONFIG.targets) {
+      const snap = detailSnapshots[target];
+      if (snap?.items) {
+        const found = snap.items.find(i => i.identifier && i.identifier !== '');
+        if (found) {
+          testDetailItem = { identifier: found.identifier, subject: found.subject };
+          break;
+        }
+      }
+    }
+
+    if (testDetailItem) {
+      log('UI', 'INFO', '--- 详情页测试 ---', `identifier="${testDetailItem.identifier}" subject="${testDetailItem.subject.slice(0, 30)}"`);
+
+      store.setState({ detailView: testDetailItem });
+      await sleep(200);
+
+      const detailPage = shadow.querySelector('.dw-detail-page');
+      log('UI', detailPage ? 'PASS' : 'FAIL', '详情页渲染', `detailPage=${!!detailPage}`);
+
+      if (detailPage) {
+        // 标题栏元素验证
+        const backBtn = shadow.querySelector('.dw-detail-back');
+        const detailId = shadow.querySelector('.dw-detail-id');
+        const detailTitle = shadow.querySelector('.dw-detail-title');
+        log('UI', backBtn ? 'PASS' : 'FAIL', '详情页返回按钮', `存在=${!!backBtn}`);
+        log('UI', detailId?.textContent === testDetailItem.identifier ? 'PASS' : 'FAIL', '详情页 identifier',
+          `expected="${testDetailItem.identifier}" actual="${detailId?.textContent}"`);
+        log('UI', detailTitle?.textContent ? 'PASS' : 'FAIL', '详情页标题',
+          `text="${detailTitle?.textContent?.slice(0, 40)}"`);
+
+        // 返回按钮 aria-label
+        const backLabel = backBtn?.getAttribute('aria-label');
+        log('UI', backLabel ? 'PASS' : 'WARN', '详情页返回按钮 aria-label', `aria-label="${backLabel}"`);
+
+        // 拖拽手柄
+        const detailHeader = shadow.querySelector('.dw-detail-header');
+        log('UI', detailHeader?.hasAttribute('data-drag-handle') ? 'PASS' : 'FAIL', '详情页拖拽手柄',
+          `data-drag-handle=${detailHeader?.hasAttribute('data-drag-handle')}`);
+
+        // 主面板内容区互斥：dw-content 不应存在
+        const mainContentInDetail = shadow.querySelector('.dw-content');
+        log('UI', !mainContentInDetail ? 'PASS' : 'FAIL', '详情页与主面板互斥',
+          `dw-content=${mainContentInDetail ? '存在（不应存在）' : '已隐藏'}`);
+
+        // 详情内容区滚动能力
+        const detailContent = shadow.querySelector('.dw-detail-content') as HTMLElement | null;
+        if (detailContent) {
+          const dcs = getComputedStyle(detailContent);
+          const detailOverflow = dcs.overflowY;
+          log('UI', detailOverflow === 'auto' || detailOverflow === 'scroll' ? 'PASS' : 'FAIL', '详情页 overflow-y',
+            `expected="auto" actual="${detailOverflow}"`);
+
+          const detailGutter = dcs.getPropertyValue('scrollbar-gutter') || (dcs as any).scrollbarGutter || '';
+          log('UI', detailGutter.includes('stable') ? 'PASS' : 'FAIL', '详情页 scrollbar-gutter',
+            `expected="stable" actual="${detailGutter}"`);
+
+          // data-no-drag 验证：内容区滚动不应触发拖拽
+          log('UI', detailContent.hasAttribute('data-no-drag') ? 'PASS' : 'FAIL', '详情页内容区 data-no-drag',
+            `data-no-drag=${detailContent.hasAttribute('data-no-drag')}`);
+
+          // Flex 布局验证：detail-page 应为 flex:1 + min-height:0
+          const pageCS = getComputedStyle(detailPage);
+          const pageFlex = pageCS.flex;
+          const pageMinH = pageCS.minHeight;
+          log('UI', pageFlex.startsWith('1') && pageMinH === '0px' ? 'PASS' : 'FAIL', '详情页 flex 布局',
+            `flex="${pageFlex}" minHeight="${pageMinH}"（需要 flex:1 + min-height:0 才能滚动）`);
+
+          // 等待详情数据加载
+          log('UI', 'INFO', '等待详情 API 响应...（最长 5s）');
+          await sleep(5000);
+
+          const spinner = shadow.querySelector('.dw-detail-page .dw-req-spinner');
+          const errorEl = shadow.querySelector('.dw-detail-status.error');
+          const fields = shadow.querySelectorAll('.dw-detail-field');
+
+          if (spinner) {
+            log('UI', 'WARN', '详情页仍在加载', '5s 内未完成加载，API 可能超时');
+          } else if (errorEl) {
+            log('UI', 'WARN', '详情页加载失败', `error="${errorEl.textContent?.trim()}"`);
+            const retryBtn = shadow.querySelector('.dw-detail-status .dw-req-retry');
+            log('UI', retryBtn ? 'PASS' : 'FAIL', '详情页重试按钮', `存在=${!!retryBtn}`);
+          } else if (fields.length > 0) {
+            log('UI', 'PASS', '详情页字段渲染', `fieldCount=${fields.length}`);
+
+            // 字段结构验证
+            const firstField = fields[0] as HTMLElement;
+            const labelEl = firstField.querySelector('.dw-detail-field-label');
+            const valueEl = firstField.querySelector('.dw-detail-field-value');
+            log('UI', labelEl && valueEl ? 'PASS' : 'FAIL', '详情页字段结构',
+              `label="${labelEl?.textContent?.trim()}" value="${valueEl?.textContent?.trim()?.slice(0, 50)}"`);
+
+            // 字段布局验证：label 和 value 应纵向排列（flex-direction: column）
+            const fieldCS = getComputedStyle(firstField);
+            log('UI', fieldCS.flexDirection === 'column' ? 'PASS' : 'FAIL', '详情页字段纵向布局',
+              `flex-direction="${fieldCS.flexDirection}"（纵向布局避免换行问题）`);
+
+            // 列出前 5 个字段名称
+            const fieldNames: string[] = [];
+            fields.forEach((f, i) => {
+              if (i < 5) fieldNames.push(f.querySelector('.dw-detail-field-label')?.textContent?.trim() ?? '?');
+            });
+            log('UI', 'INFO', '详情页字段列表（前5）', fieldNames.join(' | '));
+
+            // 滚动测试：内容溢出时验证可滚到底部
+            if (detailContent.scrollHeight > detailContent.clientHeight) {
+              detailContent.scrollTop = detailContent.scrollHeight;
+              await sleep(100);
+              const scrolledBottom = Math.abs(detailContent.scrollTop + detailContent.clientHeight - detailContent.scrollHeight) < 2;
+              log('UI', scrolledBottom ? 'PASS' : 'FAIL', '详情页滚动到底部',
+                `scrollTop=${Math.round(detailContent.scrollTop)} scrollHeight=${detailContent.scrollHeight} clientHeight=${detailContent.clientHeight}`);
+
+              // 最后一个字段可见性
+              const lastField = fields[fields.length - 1] as HTMLElement;
+              const lfr = lastField.getBoundingClientRect();
+              const dcr = detailContent.getBoundingClientRect();
+              const lastVisible = lfr.bottom <= dcr.bottom + 2;
+              log('UI', lastVisible ? 'PASS' : 'FAIL', '详情页底部字段可见',
+                `lastFieldBottom=${Math.round(lfr.bottom)} containerBottom=${Math.round(dcr.bottom)} lastFieldLabel="${lastField.querySelector('.dw-detail-field-label')?.textContent?.trim()}"`);
+
+              detailContent.scrollTop = 0;
+              await sleep(100);
+            } else {
+              log('UI', 'PASS', '详情页内容未溢出', `scrollHeight=${detailContent.scrollHeight} clientHeight=${detailContent.clientHeight}（无需滚动）`);
+            }
+          } else {
+            log('UI', 'INFO', '详情页暂无字段数据');
+          }
+        } else {
+          log('UI', 'FAIL', '详情页内容容器 .dw-detail-content 未找到');
+        }
+
+        // 返回主面板
+        store.setState({ detailView: null });
+        await sleep(200);
+        const detailGone = !shadow.querySelector('.dw-detail-page');
+        const mainRestored = !!shadow.querySelector('.dw-content');
+        log('UI', detailGone && mainRestored ? 'PASS' : 'FAIL', '详情页返回主面板',
+          `detailRemoved=${detailGone} mainContentRestored=${mainRestored}`);
+      }
+    } else {
+      log('UI', 'WARN', '详情页测试跳过', '所有快照中均无含 identifier 的需求项');
+    }
+
+    // 确保恢复到主面板
+    store.setState({ detailView: null });
     await sleep(100);
 
     // 7. 收起面板 → 回到悬浮球
@@ -760,8 +911,8 @@ export class TestRunner {
         `poolHeaders=${poolHeaders.length}`);
       poolHeaders.forEach(header => {
         const headerEl = header as HTMLElement;
-        const name = headerEl.querySelector('.dw-changes-pool-name')?.textContent?.trim() ?? '';
-        const dot = headerEl.querySelector('.dw-history-pool-dot') as HTMLElement | null;
+        const name = headerEl.querySelector('.dw-pool-label')?.textContent?.trim() ?? '';
+        const dot = headerEl.querySelector('.dw-pool-dot') as HTMLElement | null;
         const hasBorderLeft = headerEl.style.borderLeft?.includes('solid');
         const hasDot = dot && dot.style.background;
         log('UI', hasBorderLeft && hasDot ? 'PASS' : 'WARN', `池标题 "${name}"`,
@@ -784,6 +935,19 @@ export class TestRunner {
         const liUS = getComputedStyle(changeLi).userSelect;
         log('UI', liUS !== 'none' ? 'PASS' : 'FAIL', '需求名可选中',
           `user-select="${liUS}"（应允许复制需求名）`);
+      }
+
+      // 清除按钮二次确认机制
+      const clearBtns = shadow.querySelectorAll('.dw-changes-clear');
+      if (clearBtns.length > 0) {
+        const clearBtn = clearBtns[0] as HTMLElement;
+        const initialText = clearBtn.textContent?.trim();
+        log('UI', initialText === '清除' ? 'PASS' : 'FAIL', '清除按钮初始文本',
+          `expected="清除" actual="${initialText}"`);
+        log('UI', !clearBtn.classList.contains('confirming') ? 'PASS' : 'FAIL', '清除按钮初始状态',
+          `confirming=${clearBtn.classList.contains('confirming')}（初始不应有确认样式）`);
+      } else {
+        log('UI', 'INFO', '未找到清除按钮（可能仅一个池有变化）');
       }
     } else {
       log('UI', 'INFO', '无需求变化数据，跳过变化 section 验证');
@@ -868,8 +1032,117 @@ export class TestRunner {
       log('UI', 'FAIL', '滚动容器 .dw-content 未找到');
     }
 
+    // 15. 可访问性验证（aria 属性）
+    log('UI', 'INFO', '--- 可访问性验证 ---');
+
+    const allSvgs = shadow.querySelectorAll('svg');
+    let svgHiddenCount = 0;
+    let svgMissingAria = 0;
+    allSvgs.forEach(svg => {
+      if (svg.getAttribute('aria-hidden') === 'true') {
+        svgHiddenCount++;
+      } else if (!svg.getAttribute('aria-label')) {
+        svgMissingAria++;
+      }
+    });
+    log('UI', svgMissingAria === 0 ? 'PASS' : 'WARN', 'SVG aria 属性',
+      `total=${allSvgs.length} aria-hidden=${svgHiddenCount} missingAria=${svgMissingAria}`);
+
+    const closeBtn = shadow.querySelector('.dw-close-btn');
+    const closeBtnLabel = closeBtn?.getAttribute('aria-label');
+    log('UI', closeBtnLabel ? 'PASS' : 'WARN', '关闭按钮 aria-label',
+      `aria-label="${closeBtnLabel ?? '(无)'}"`);
+
+    // 16. CSS 类名迁移验证（旧名不应存在）
+    log('UI', 'INFO', '--- CSS 类名迁移验证 ---');
+
+    const oldPoolName = shadow.querySelector('.dw-changes-pool-name');
+    log('UI', !oldPoolName ? 'PASS' : 'FAIL', '旧类名 dw-changes-pool-name',
+      `${oldPoolName ? '仍存在（应迁移为 dw-pool-label）' : '已移除'}`);
+
+    const oldPoolDot = shadow.querySelector('.dw-history-pool-dot');
+    log('UI', !oldPoolDot ? 'PASS' : 'FAIL', '旧类名 dw-history-pool-dot',
+      `${oldPoolDot ? '仍存在（应迁移为 dw-pool-dot）' : '已移除'}`);
+
+    store.setState({ requirementsCollapsed: false, changesCollapsed: false, chartCollapsed: true, historyCollapsed: true });
+    await sleep(100);
+    const poolLabelsAll = shadow.querySelectorAll('.dw-pool-label');
+    const poolDotsAll = shadow.querySelectorAll('.dw-pool-dot');
+    log('UI', poolLabelsAll.length > 0 ? 'PASS' : 'WARN', '新类名 dw-pool-label',
+      `count=${poolLabelsAll.length}（需求列表+变化区域共享）`);
+    log('UI', poolDotsAll.length > 0 ? 'PASS' : 'WARN', '新类名 dw-pool-dot',
+      `count=${poolDotsAll.length}（需求列表+变化+历史共享）`);
+
+    store.setState({ requirementsCollapsed: true, changesCollapsed: true });
+    await sleep(100);
+
+    // 17. 颜色对比度抽检（检查关键元素的计算颜色）
+    log('UI', 'INFO', '--- 颜色对比度抽检 ---');
+
+    const contrastChecks: { selector: string; name: string; minContrast: string }[] = [
+      { selector: '.dw-memory-text', name: '内存文字', minContrast: '#64748b' },
+      { selector: '.dw-section-arrow', name: '折叠箭头', minContrast: '#64748b' },
+    ];
+
+    // 展开需求列表检查序号和箭头颜色
+    store.setState({ requirementsCollapsed: false, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+    await sleep(100);
+
+    const reqIdxEl = shadow.querySelector('.dw-req-idx') as HTMLElement | null;
+    if (reqIdxEl) {
+      const idxColor = getComputedStyle(reqIdxEl).color;
+      log('UI', 'INFO', '需求序号颜色', `color="${idxColor}"（需满足 WCAG AA 4.5:1）`);
+    }
+
+    const reqChevronEl = shadow.querySelector('.dw-req-chevron') as HTMLElement | null;
+    if (reqChevronEl) {
+      const chevronColor = getComputedStyle(reqChevronEl).color;
+      log('UI', 'INFO', '需求箭头颜色', `color="${chevronColor}"（需满足 WCAG AA 4.5:1）`);
+    }
+
+    for (const check of contrastChecks) {
+      const el = shadow.querySelector(check.selector) as HTMLElement | null;
+      if (el) {
+        const color = getComputedStyle(el).color;
+        log('UI', 'INFO', `${check.name} 颜色`, `selector="${check.selector}" color="${color}" expectedMin="${check.minContrast}"`);
+      }
+    }
+
+    // 展开变化区域检查时间戳颜色
+    store.setState({ changesCollapsed: false, requirementsCollapsed: true });
+    await sleep(100);
+    const changeTimeEl = shadow.querySelector('.dw-changes-time') as HTMLElement | null;
+    if (changeTimeEl) {
+      const timeColor = getComputedStyle(changeTimeEl).color;
+      log('UI', 'INFO', '变化时间戳颜色', `color="${timeColor}"（需满足 WCAG AA 4.5:1）`);
+    }
+
+    // 18. 折叠区域动画验证
+    log('UI', 'INFO', '--- 折叠区域动画验证 ---');
+    store.setState({ requirementsCollapsed: true, changesCollapsed: true, chartCollapsed: true, historyCollapsed: true });
+    await sleep(100);
+    store.setState({ requirementsCollapsed: false });
+    await sleep(50);
+
+    const animatedBody = shadow.querySelector('.dw-section-body') as HTMLElement | null;
+    if (animatedBody) {
+      const anim = getComputedStyle(animatedBody).animationName;
+      log('UI', anim && anim !== 'none' ? 'PASS' : 'WARN', '折叠区域展开动画',
+        `animationName="${anim}"（期望 dw-section-open）`);
+    }
+
+    // 19. detailView store 状态一致性
+    log('UI', 'INFO', '--- Store detailView 状态验证 ---');
+    const dvState = store.getState().detailView;
+    log('UI', dvState === null ? 'PASS' : 'WARN', 'detailView 初始/恢复状态',
+      `detailView=${dvState === null ? 'null（正常）' : JSON.stringify(dvState) + '（应在测试后恢复为 null）'}`);
+
+    // 恢复折叠状态
+    store.setState({ requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true, historyCollapsed: true });
+    await sleep(100);
+
     // 恢复收起状态
-    store.setState({ isExpanded: false });
+    store.setState({ isExpanded: false, detailView: null });
   }
 
   // ==================== Phase 7: 通知测试 ====================

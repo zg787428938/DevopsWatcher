@@ -1,6 +1,3 @@
-/**
- * ChangesSection.tsx - 需求变化区块组件，按池分组展示所有变化记录（含时间戳），支持按池清除
- */
 import React from 'react';
 import { CONFIG, formatTimestamp, getTargetColor } from '../../config';
 import { store } from '../../store';
@@ -13,7 +10,9 @@ interface Props {
   onToggle: () => void;
 }
 
-export const ChangesSection: React.FC<Props> = ({ changes, collapsed, onToggle }) => {
+export const ChangesSection: React.FC<Props> = React.memo(({ changes, collapsed, onToggle }) => {
+  const [confirmingClear, setConfirmingClear] = React.useState<string | null>(null);
+
   const activeChanges = changes.filter(c => CONFIG.targets.includes(c.poolName));
   const totalChanges = activeChanges.reduce((sum, c) => sum + c.added.length + c.removed.length, 0);
 
@@ -23,9 +22,16 @@ export const ChangesSection: React.FC<Props> = ({ changes, collapsed, onToggle }
     grouped.get(c.poolName)!.push(c);
   }
 
-  const handleClear = (poolName: string) => {
-    store.clearChange(poolName);
-    db.clearChangesByPool(poolName).catch(() => {});
+  const handleClearClick = (poolName: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirmingClear === poolName) {
+      store.clearChange(poolName);
+      db.clearChangesByPool(poolName).catch(() => {});
+      setConfirmingClear(null);
+    } else {
+      setConfirmingClear(poolName);
+      setTimeout(() => setConfirmingClear(prev => prev === poolName ? null : prev), 3000);
+    }
   };
 
   return (
@@ -35,7 +41,7 @@ export const ChangesSection: React.FC<Props> = ({ changes, collapsed, onToggle }
           需求变化
           {totalChanges > 0 && <span className="dw-section-badge">{totalChanges}</span>}
         </span>
-        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <svg className={`dw-section-arrow${collapsed ? '' : ' open'}`} width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
           <path d="M3.5 2L7 5L3.5 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       </div>
@@ -49,19 +55,19 @@ export const ChangesSection: React.FC<Props> = ({ changes, collapsed, onToggle }
               const poolColor = colorIdx >= 0 ? getTargetColor(colorIdx) : '#64748b';
               return (
                 <div key={poolName} className="dw-changes-pool">
-                  <div className="dw-changes-pool-header" style={{ borderLeft: `3px solid ${poolColor}`, paddingLeft: 10 }}>
-                    <span className="dw-changes-pool-name">
-                      <span className="dw-history-pool-dot" style={{ background: poolColor }} />
+                  <div className="dw-changes-pool-header" style={{ borderLeft: `3px solid ${poolColor}` }}>
+                    <span className="dw-pool-label">
+                      <span className="dw-pool-dot" style={{ background: poolColor }} />
                       {poolName}
-                      <span className="dw-section-badge" style={{ marginLeft: 4 }}>
+                      <span className="dw-section-badge">
                         {poolChanges.length}
                       </span>
                     </span>
                     <button
-                      className="dw-changes-clear"
-                      onClick={(e) => { e.stopPropagation(); handleClear(poolName); }}
+                      className={`dw-changes-clear${confirmingClear === poolName ? ' confirming' : ''}`}
+                      onClick={(e) => handleClearClick(poolName, e)}
                     >
-                      清除
+                      {confirmingClear === poolName ? '确认清除？' : '清除'}
                     </button>
                   </div>
 
@@ -114,4 +120,4 @@ export const ChangesSection: React.FC<Props> = ({ changes, collapsed, onToggle }
       )}
     </div>
   );
-};
+});

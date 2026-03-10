@@ -1,30 +1,83 @@
-// 展开面板主组件：包含可拖拽标题栏、需求池卡片网格、状态栏、以及需求列表/趋势图表/需求变化/历史记录四个折叠区域
-// 标题栏标记 data-drag-handle 使其可拖拽移动，内容区标记 data-no-drag 防止滚动时误触拖拽
-
-import React from 'react';
+import React, { useCallback } from 'react';
 import { CONFIG } from '../../config';
 import { store } from '../../store';
-import type { MonitorState } from '../../types';
+import { useSelector } from './hooks';
 import { PoolCards } from './PoolCards';
 import { StatusBar } from './StatusBar';
 import { TrendChart } from './TrendChart';
 import { ChangesSection } from './ChangesSection';
 import { RequirementsSection } from './RequirementsSection';
 import { HistorySection } from './HistorySection';
+import { DetailPage } from './DetailPage';
 
 interface Props {
-  state: MonitorState;
   maxHeight?: number;
 }
 
-export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
-  const { countdown } = state;
+export const Panel: React.FC<Props> = ({ maxHeight }) => {
+  const { countdown, poolSnapshots, status, statusType, memoryUsage,
+    requirementsCollapsed, chartCollapsed, changesCollapsed, historyCollapsed,
+    changes, history, historyTotal, detailView } = useSelector((s) => ({
+    countdown: s.countdown,
+    poolSnapshots: s.poolSnapshots,
+    status: s.status,
+    statusType: s.statusType,
+    memoryUsage: s.memoryUsage,
+    requirementsCollapsed: s.requirementsCollapsed,
+    chartCollapsed: s.chartCollapsed,
+    changesCollapsed: s.changesCollapsed,
+    historyCollapsed: s.historyCollapsed,
+    changes: s.changes,
+    history: s.history,
+    historyTotal: s.historyTotal,
+    detailView: s.detailView,
+  }));
 
   let countdownColor = '#334155';
   if (countdown <= CONFIG.dangerThreshold) {
     countdownColor = '#dc2626';
   } else if (countdown <= CONFIG.warningThreshold) {
     countdownColor = '#d97706';
+  }
+
+  const toggleRequirements = useCallback(() => {
+    const s = store.getState();
+    store.setState({
+      requirementsCollapsed: !s.requirementsCollapsed,
+      ...(!s.requirementsCollapsed ? {} : { chartCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
+    });
+  }, []);
+
+  const toggleChart = useCallback(() => {
+    const s = store.getState();
+    store.setState({
+      chartCollapsed: !s.chartCollapsed,
+      ...(!s.chartCollapsed ? {} : { requirementsCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
+    });
+  }, []);
+
+  const toggleChanges = useCallback(() => {
+    const s = store.getState();
+    store.setState({
+      changesCollapsed: !s.changesCollapsed,
+      ...(!s.changesCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, historyCollapsed: true }),
+    });
+  }, []);
+
+  const toggleHistory = useCallback(() => {
+    const s = store.getState();
+    store.setState({
+      historyCollapsed: !s.historyCollapsed,
+      ...(!s.historyCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true }),
+    });
+  }, []);
+
+  if (detailView) {
+    return (
+      <div className="dw-panel" style={maxHeight ? { maxHeight } : undefined}>
+        <DetailPage identifier={detailView.identifier} subject={detailView.subject} />
+      </div>
+    );
   }
 
   return (
@@ -42,8 +95,9 @@ export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
             className="dw-close-btn"
             onClick={() => store.setState({ isExpanded: false })}
             title="收起"
+            aria-label="收起面板"
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <path d="M11 3L3 11M3 3l8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
             </svg>
           </button>
@@ -51,49 +105,37 @@ export const Panel: React.FC<Props> = ({ state, maxHeight }) => {
       </div>
 
       <div className="dw-content" data-no-drag>
-        <PoolCards snapshots={state.poolSnapshots} />
+        <PoolCards snapshots={poolSnapshots} />
 
         <StatusBar
-          status={state.status}
-          statusType={state.statusType}
-          memoryUsage={state.memoryUsage}
+          status={status}
+          statusType={statusType}
+          memoryUsage={memoryUsage}
         />
 
         <RequirementsSection
-          snapshots={state.poolSnapshots}
-          collapsed={state.requirementsCollapsed}
-          onToggle={() => store.setState({
-            requirementsCollapsed: !state.requirementsCollapsed,
-            ...(!state.requirementsCollapsed ? {} : { chartCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
-          })}
+          snapshots={poolSnapshots}
+          collapsed={requirementsCollapsed}
+          onToggle={toggleRequirements}
         />
 
         <TrendChart
-          history={state.history}
-          collapsed={state.chartCollapsed}
-          onToggle={() => store.setState({
-            chartCollapsed: !state.chartCollapsed,
-            ...(!state.chartCollapsed ? {} : { requirementsCollapsed: true, changesCollapsed: true, historyCollapsed: true }),
-          })}
+          history={history}
+          collapsed={chartCollapsed}
+          onToggle={toggleChart}
         />
 
         <ChangesSection
-          changes={state.changes}
-          collapsed={state.changesCollapsed}
-          onToggle={() => store.setState({
-            changesCollapsed: !state.changesCollapsed,
-            ...(!state.changesCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, historyCollapsed: true }),
-          })}
+          changes={changes}
+          collapsed={changesCollapsed}
+          onToggle={toggleChanges}
         />
 
         <HistorySection
-          history={state.history}
-          historyTotal={state.historyTotal}
-          collapsed={state.historyCollapsed}
-          onToggle={() => store.setState({
-            historyCollapsed: !state.historyCollapsed,
-            ...(!state.historyCollapsed ? {} : { requirementsCollapsed: true, chartCollapsed: true, changesCollapsed: true }),
-          })}
+          history={history}
+          historyTotal={historyTotal}
+          collapsed={historyCollapsed}
+          onToggle={toggleHistory}
         />
       </div>
     </div>

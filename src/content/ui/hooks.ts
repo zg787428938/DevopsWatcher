@@ -1,16 +1,45 @@
-/**
- * 内容脚本 UI 层使用的 React Hooks：提供对全局 store 中 MonitorState 的订阅式访问，使组件能响应状态变化并自动重渲染。
- */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { store } from '../../store';
 import type { MonitorState } from '../../types';
 
-/** 订阅全局 store 的 MonitorState，状态变化时触发组件重渲染，返回当前完整监控状态 */
+function shallowEqual<T extends Record<string, unknown>>(a: T, b: T): boolean {
+  if (a === b) return true;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}
+
+/** 订阅 store 中由 selector 选取的状态切片，仅在切片浅比较变化时触发重渲染 */
+export function useSelector<T extends Record<string, unknown>>(
+  selector: (state: MonitorState) => T,
+): T {
+  const [slice, setSlice] = useState(() => selector(store.getState()));
+  const sliceRef = useRef(slice);
+  sliceRef.current = slice;
+
+  const selectorRef = useRef(selector);
+  selectorRef.current = selector;
+
+  useEffect(() => {
+    return store.subscribe(() => {
+      const next = selectorRef.current(store.getState());
+      if (!shallowEqual(sliceRef.current, next)) {
+        setSlice(next);
+      }
+    });
+  }, []);
+
+  return slice;
+}
+
+/** 订阅全局 store 的完整 MonitorState（仅供 App 顶层使用，子组件应使用 useSelector） */
 export function useMonitorState(): MonitorState {
-  // 使用 useState 初始化并持有当前 store 状态，getState() 获取最新快照
   const [state, setState] = useState(store.getState());
 
-  // 在挂载时订阅 store 变更，每次 store 更新时用 setState 触发重渲染；卸载时取消订阅
   useEffect(() => {
     return store.subscribe(() => setState(store.getState()));
   }, []);

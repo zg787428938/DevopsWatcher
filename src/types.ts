@@ -154,6 +154,7 @@ export interface MonitorState {
   changesCollapsed: boolean; // 需求变化折叠区域是否收起
   historyCollapsed: boolean; // 历史记录折叠区域是否收起
   requirementsCollapsed: boolean; // 需求列表折叠区域是否收起
+  detailView: { identifier: string; subject: string } | null; // 当前正在查看的需求详情（null 为主页）
   currentRound: number; // 当前检测轮次编号，每轮递增
   isTesting: boolean; // 是否正在执行测试流程（与监控互斥）
 }
