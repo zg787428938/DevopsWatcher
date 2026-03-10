@@ -83,21 +83,22 @@ src/
     │   ├── pagination.ts   # 模拟翻页收集全量数据（返回 requirements + items）
     │   ├── click.ts        # 模拟真实用户点击（Pointer+Mouse 事件序列）
     │   ├── recovery.ts     # 异常恢复（内存超限/API 超时延迟至轮次结束后刷新，上下文失效立即刷新）
-    │   └── test-runner.ts  # 诊断测试套件（10 Phase + Summary）
+    │   └── test-runner.ts  # 诊断测试套件（10 Phase + Summary，含详情页/可访问性/动画/颜色对比度测试）
     └── ui/
         ├── globals.css     # Tailwind CSS 指令 + shadcn CSS 变量（:host 作用域）
         ├── App.tsx         # 根组件（展开/收起切换 + 位置持久化）
         ├── FloatingBall.tsx # 悬浮球（倒计时进度环）
-        ├── Panel.tsx       # 展开面板（互斥折叠区域容器）
+        ├── Panel.tsx       # 展开面板（互斥折叠区域容器 + detailView 路由）
         ├── PoolCards.tsx   # 需求池卡片（动态列数）
         ├── StatusBar.tsx   # 状态栏
         ├── TrendChart.tsx  # 趋势折线图（Chart.js）
-        ├── RequirementsSection.tsx # 需求列表（按池分组，点击获取工作项详情）
-        ├── ChangesSection.tsx # 需求变化列表（按池分组、持久化、带时间戳）
+        ├── RequirementsSection.tsx # 需求列表（按池分组，点击跳转详情页）
+        ├── ChangesSection.tsx # 需求变化列表（按池分组、持久化、带时间戳、清除二次确认）
         ├── HistorySection.tsx # 历史记录（无限滚动 + 差值显示）
         ├── DragWrapper.tsx # 拖拽容器（中心锚点边界检测）
-        ├── hooks.ts        # useMonitorState hook
-        └── styles.ts       # Shadow DOM 内联 CSS（浅色主题，scrollbar-gutter: stable）
+        ├── DetailPage.tsx   # 需求详情独立页面（flex 布局 + 滚动容器）
+        ├── hooks.ts        # useSelector（shallowEqual 切片订阅）+ useMonitorState hook
+        └── styles.ts       # Shadow DOM 内联 CSS（浅色主题，scrollbar-gutter: stable，共享类名 dw-pool-label/dw-pool-dot）
 ```
 
 ---
@@ -217,7 +218,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 
 ## 状态管理（store.ts）
 
-`MonitorStore` 基于发布-订阅模式，`setState` 触发所有订阅者回调，驱动 React 重渲染。
+`MonitorStore` 基于发布-订阅模式，`setState` 触发所有订阅者回调，驱动 React 重渲染。子组件通过 `useSelector` hook 订阅状态切片，配合 `shallowEqual` 浅比较仅在切片变化时重渲染，避免全量更新。所有子组件使用 `React.memo` 包裹进一步减少不必要的重渲染。
 
 关键状态字段：
 
@@ -229,6 +230,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | `changes` | 需求变化数组（全量累积，上限 `maxChangesRecords`） |
 | `countdown` | 倒计时秒数 |
 | `isExpanded` | 面板是否展开 |
+| `detailView` | 详情页状态（`{ identifier, subject } | null`），非 null 时面板渲染详情页替代主内容 |
 | `requirementsCollapsed` / `chartCollapsed` / `changesCollapsed` / `historyCollapsed` | 折叠区域状态（互斥展开） |
 | `collapsedPos` / `expandedPos` | 拖拽位置坐标 |
 
@@ -275,7 +277,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | 3 | Scanner | 侧边栏菜单扫描 |
 | 4 | InitialCollect | 当前页面数据提取 + 多页感知（非首页时跳过快照保存避免误报） |
 | 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 + items/identifier 完整性 |
-| 6 | UI | 悬浮球/面板/卡片点色/需求列表（池分组+点击性+序号+展开箭头）/变化区块结构/数量差值/文字可选择性/scrollbar-gutter 稳定性 |
+| 6 | UI | 悬浮球/面板/卡片点色/需求列表（池分组+点击性+序号+展开箭头）/详情页（渲染+identifier+标题+aria+拖拽+互斥+overflow+scrollbar-gutter+flex 布局+字段加载+滚动到底+底部可见+返回）/变化区块结构/数量差值/清除按钮确认/文字可选择性/scrollbar-gutter 稳定性/可访问性（SVG aria-hidden+关闭按钮 aria-label）/CSS 类名迁移（旧名移除+新名生效）/颜色对比度抽检/折叠动画验证/detailView 状态一致性 |
 | 7 | Notification | 上下文有效性预检 + 桌面通知 + 蜂鸣音 + 权限状态 |
 | 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性/日志持久化(`logs` store 记录数 + `ts` 字段完整性)/快照 items 字段+identifier 完整性 |
 | 9 | Memory | JS 堆内存 + 80% 阈值预警 |
@@ -355,6 +357,12 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 
 ### 为什么面板使用 scrollbar-gutter: stable？
 面板内容区（`.dw-content`）和折叠区域（`.dw-section-body`）使用 `overflow-y: auto`，滚动条仅在内容溢出时出现。传统 overlay scrollbar 出现/消失会导致内容区宽度变化，引起卡片网格、图表等元素重新布局产生视觉跳动。`scrollbar-gutter: stable` 始终为滚动条预留空间，无论是否溢出，消除了宽度跳变。
+
+### 为什么需求详情用独立页面而非内联展开？
+需求详情字段较多（通常 20+ 个），内联展示时字段值会频繁换行，信息密度低且可读性差。独立页面占据面板完整高度，内容区域独立滚动（`flex: 1; min-height: 0;` + `overflow-y: auto`），可完整展示所有字段。通过 `detailView` 状态控制与主面板互斥显示，返回按钮清空 `detailView` 即恢复主面板。
+
+### 为什么用 useSelector + shallowEqual 而非直接订阅全量状态？
+`MonitorStore` 的 `setState` 会触发所有订阅者回调。如果每个组件都订阅完整 `MonitorState`，任何字段变化都会导致所有组件重渲染。`useSelector` 让组件只声明关心的状态切片，`shallowEqual` 浅比较确保切片未变化时不触发 `setState`，配合 `React.memo` 从根本上消除不必要的重渲染。
 
 ### 拖拽边界检测
 以元素中心为锚点：中心点不超出视口即可，元素可部分露出边缘。公式：`x ∈ [-width/2, vw - width/2]`。展开和收起状态分别维护独立位置坐标，持久化到 IndexedDB。
