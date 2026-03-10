@@ -371,6 +371,52 @@ export class TestRunner {
       }).join(' ');
       log('CountdownRound', 'PASS', '轮次后快照完整', summary);
     }
+
+    // 跨池数据污染检测：各池快照的 items 不应出现在其他池中
+    const poolItemSets = new Map<string, Set<string>>();
+    for (const target of CONFIG.targets) {
+      const snap = finalSnapshots[target];
+      if (snap?.items && snap.items.length > 0) {
+        poolItemSets.set(target, new Set(snap.items.map(i => i.identifier).filter(Boolean)));
+      }
+    }
+    const contaminations: string[] = [];
+    const poolNames = [...poolItemSets.keys()];
+    for (let i = 0; i < poolNames.length; i++) {
+      for (let j = i + 1; j < poolNames.length; j++) {
+        const setA = poolItemSets.get(poolNames[i])!;
+        const setB = poolItemSets.get(poolNames[j])!;
+        let overlap = 0;
+        for (const id of setA) {
+          if (setB.has(id)) overlap++;
+        }
+        if (overlap > 0) {
+          contaminations.push(`"${poolNames[i]}" 与 "${poolNames[j]}" 有 ${overlap} 条重复 identifier`);
+        }
+      }
+    }
+    if (contaminations.length > 0) {
+      log('CountdownRound', 'FAIL', '跨池数据污染', contaminations.join('\n'));
+    } else if (poolItemSets.size >= 2) {
+      log('CountdownRound', 'PASS', '跨池数据隔离', `${poolItemSets.size} 个池的 identifier 无重叠`);
+    }
+
+    // 跨池 totalCount 互换检测：检查是否有池的 totalCount 与其他池完全一致（可疑）
+    const countMap = new Map<number, string[]>();
+    for (const target of CONFIG.targets) {
+      const snap = finalSnapshots[target];
+      if (snap) {
+        const arr = countMap.get(snap.totalCount) ?? [];
+        arr.push(target);
+        countMap.set(snap.totalCount, arr);
+      }
+    }
+    for (const [count, pools] of countMap) {
+      if (pools.length > 1) {
+        log('CountdownRound', 'WARN', '多池 totalCount 相同',
+          `${pools.map(p => `"${p}"`).join(' 和 ')} 的 totalCount 均为 ${count}，可能存在数据互换`);
+      }
+    }
   }
 
   // 通用的点击 → 等待 → 收集流程，供 initialCollect 和 countdownRound 共用
@@ -398,6 +444,22 @@ export class TestRunner {
       try {
         const apiStart = Date.now();
         apiData = await this.apiBridge.waitForFreshResponse(clickTime, 15_000);
+
+        // 跨池数据污染检测
+        const activePool = this.scanner.getCurrentPoolName();
+        if (activePool && activePool !== poolName) {
+          log(phase, 'FAIL', `"${poolName}" 跨池数据污染`,
+            `activePool="${activePool}" expected="${poolName}"，API 数据来自错误的池`);
+          apiData = undefined;
+          if (attempt < CONFIG.apiWaitMaxRetries) {
+            this.apiBridge.invalidateFreshness();
+            simulateClick(menuItem);
+            await sleep(CONFIG.apiWaitRetryInterval);
+            continue;
+          }
+          return false;
+        }
+
         log(phase, 'PASS', `"${poolName}" API 响应成功 (${Date.now() - apiStart}ms, attempt=${attempt})`, formatApiData(apiData));
         break;
       } catch {

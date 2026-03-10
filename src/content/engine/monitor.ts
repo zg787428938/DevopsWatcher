@@ -222,8 +222,6 @@ export class Monitor {
 
         try {
           apiData = await this.apiBridge.waitForFreshResponse(clickTime, 15_000);
-          log('CheckPool', 'PASS', `"${poolName}" API 响应成功`, formatApiData(apiData));
-          break;
         } catch {
           if (attempt < CONFIG.apiWaitMaxRetries) {
             log('CheckPool', 'WARN', `"${poolName}" API 超时，重试 ${attempt + 1}/${CONFIG.apiWaitMaxRetries}`);
@@ -232,12 +230,34 @@ export class Monitor {
               statusType: 'warning',
             });
             await sleep(CONFIG.apiWaitRetryInterval);
+            continue;
           } else {
             log('CheckPool', 'FAIL', `"${poolName}" API 超时，已重试 ${CONFIG.apiWaitMaxRetries} 次`);
             store.setState({ status: `${poolName}: API 超时`, statusType: 'error' });
             return;
           }
         }
+
+        // 跨池数据污染防护：验证页面实际导航到的池是否与目标池一致
+        // 点击菜单后如果 SPA 导航失败（如标签页后台节流、事件被吞），
+        // API 响应可能来自仍然激活的旧池，导致快照被错误覆盖并触发虚假变化通知
+        const activePool = this.scanner.getCurrentPoolName();
+        if (activePool && activePool !== poolName) {
+          log('CheckPool', 'WARN', `"${poolName}" 收到非目标池数据`,
+            `activePool="${activePool}" expected="${poolName}"，丢弃 (attempt=${attempt + 1}/${CONFIG.apiWaitMaxRetries + 1})`);
+          apiData = undefined;
+          if (attempt < CONFIG.apiWaitMaxRetries) {
+            store.setState({ status: `${poolName}: 导航异常，重试...`, statusType: 'warning' });
+            await sleep(CONFIG.apiWaitRetryInterval);
+            continue;
+          }
+          log('CheckPool', 'FAIL', `"${poolName}" 多次重试仍未导航到目标池，跳过本轮`);
+          store.setState({ status: `${poolName}: 导航失败`, statusType: 'warning' });
+          return;
+        }
+
+        log('CheckPool', 'PASS', `"${poolName}" API 响应成功`, formatApiData(apiData));
+        break;
       }
 
       if (!apiData) return;

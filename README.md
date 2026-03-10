@@ -276,7 +276,7 @@ IndexedDB 数据库 `devops-watcher`，当前版本 **v3**（v2 新增 `changes`
 | 2 | API | API 拦截验证 + 数据结构校验（totalCount/result/toPage/pageSize/subject/identifier） |
 | 3 | Scanner | 侧边栏菜单扫描 |
 | 4 | InitialCollect | 当前页面数据提取 + 多页感知（非首页时跳过快照保存避免误报） |
-| 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 轮后快照完整性/去重校验 + items/identifier 完整性 |
+| 5 | CountdownRound | 完整倒计时轮询 + 分页残留检测 + 跨池数据污染检测（点击时 activePool 验证 + identifier 重叠检查 + totalCount 互换检测） + 轮后快照完整性/去重校验 + items/identifier 完整性 |
 | 6 | UI | 悬浮球/面板/卡片点色/需求列表（池分组+点击性+序号+展开箭头）/详情页（渲染+identifier+标题+aria+拖拽+互斥+overflow+scrollbar-gutter+flex 布局+字段加载+滚动到底+底部可见+返回）/变化区块结构/数量差值/清除按钮确认/文字可选择性/scrollbar-gutter 稳定性/可访问性（SVG aria-hidden+关闭按钮 aria-label）/CSS 类名迁移（旧名移除+新名生效）/颜色对比度抽检/折叠动画验证/detailView 状态一致性 |
 | 7 | Notification | 上下文有效性预检 + 桌面通知 + 蜂鸣音 + 权限状态 |
 | 8 | IndexedDB | 快照去重/历史排序/时间间隔分析/连续重复检测/变化误报模式识别/位置合理性/日志持久化(`logs` store 记录数 + `ts` 字段完整性)/快照 items 字段+identifier 完整性 |
@@ -342,6 +342,9 @@ CSS 完全隔离，避免与云效页面样式互相干扰。所有 CSS 通过 J
 
 ### 为什么折叠区域互斥展开（手风琴模式）？
 需求列表、趋势图表、需求变化、历史记录四个区域展开时各自可能占据大量高度。如果同时展开，面板总高度会远超视口，用户需要在外层滚动条和内层滚动条之间来回操作。互斥模式确保任一时刻只有一个区域展开，消除嵌套滚动问题。
+
+### 为什么 handleFirstPage 要验证 activePool？
+`ApiBridge.waitForFreshResponse` 只校验时间戳（响应到达时间 > 点击时间），不区分响应属于哪个池。当标签页处于后台时，Chrome 会节流定时器和事件队列，`simulateClick` 可能无法正确触发 SPA 导航。此时页面仍停留在旧池，旧池的后续 API 响应时间戳满足条件后被 `waitForFreshResponse` 接受，导致快照被错误池的数据覆盖。`handleFirstPage` 在接受 API 数据前调用 `scanner.getCurrentPoolName()` 验证页面实际导航到的池是否与目标一致，不一致则丢弃数据并重试。
 
 ### 为什么 finalizePool 要做数据完整性校验？
 多页需求池翻页时可能因 DOM 状态残留、网络波动等原因导致某一页数据丢失。如果将不完整的数据保存为快照并与上次比对，会产生大量虚假的"需求被移除"变化。`finalizePool` 在保存快照前检查 `collected !== totalCount`，不匹配时跳过本轮变化检测并保留旧快照，避免级联误报。
